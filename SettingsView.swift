@@ -3,6 +3,10 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var viewModel: ChatViewModel
     
+    // MARK: - 新增状态变量，用于处理删除确认
+    @State private var showDeleteAlert = false
+    @State private var pendingDeleteIndexSet: IndexSet?
+    
     var body: some View {
         List {
             Section(header: Text("当前对话模型")) {
@@ -24,7 +28,7 @@ struct SettingsView: View {
             }
             
             Section(header: Text("供应商配置")) {
-                // ⚠️ 关键：这里使用了 indices，这是修复红色报错的唯一正解
+                // 使用 indices 遍历，保持原有的 Binding 修复逻辑
                 ForEach(viewModel.providers.indices, id: \.self) { index in
                     NavigationLink {
                         ProviderDetailView(config: $viewModel.providers[index], viewModel: viewModel)
@@ -46,9 +50,10 @@ struct SettingsView: View {
                         }
                     }
                 }
+                // MARK: - 修改删除逻辑：拦截删除动作，弹出确认框
                 .onDelete { idx in
-                    viewModel.providers.remove(atOffsets: idx)
-                    viewModel.saveProviders()
+                    self.pendingDeleteIndexSet = idx
+                    self.showDeleteAlert = true
                 }
                 
                 NavigationLink {
@@ -63,8 +68,26 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
+        // MARK: - 新增 Alert 弹窗逻辑
+        .alert("确认删除供应商？", isPresented: $showDeleteAlert) {
+            Button("取消", role: .cancel) {
+                pendingDeleteIndexSet = nil
+            }
+            Button("删除", role: .destructive) {
+                if let offsets = pendingDeleteIndexSet {
+                    // 执行真正的删除操作
+                    viewModel.providers.remove(atOffsets: offsets)
+                    viewModel.saveProviders()
+                }
+                pendingDeleteIndexSet = nil
+            }
+        } message: {
+            Text("此操作不可恢复，该供应商及其保存的模型配置将被移除。")
+        }
     }
 }
+
+// 下面的代码保持不变，为了完整性保留引用
 
 // 详情页
 struct ProviderDetailView: View {
@@ -105,7 +128,7 @@ struct ProviderDetailView: View {
                 } else {
                     Button { validateAndFetch() } label: {
                         HStack {
-                            Text(isFetching ? "正在验证..." : "验证 Key 并获取模型")
+                            Text(isFetching ? "正在获取..." : "获取在线模型列表")
                             if config.isValidated && !isFetching { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
                         }
                     }
@@ -161,7 +184,6 @@ struct ProviderDetailView: View {
     }
 }
 
-// 修复后的添加模型视图 (UI 修复)
 struct AddCustomModelView: View {
     @ObservedObject var viewModel: ChatViewModel
     var providerID: UUID
@@ -189,10 +211,7 @@ struct AddCustomModelView: View {
                         .padding(.vertical, 12).frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(isDisabled ? Color.gray.opacity(0.3) : Color.green.opacity(0.8))
-                )
+                .background(RoundedRectangle(cornerRadius: 10).fill(isDisabled ? Color.gray.opacity(0.3) : Color.green.opacity(0.8)))
                 .foregroundColor(isDisabled ? Color.gray : Color.white)
                 .disabled(isDisabled)
                 .listRowInsets(EdgeInsets())

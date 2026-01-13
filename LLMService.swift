@@ -1,13 +1,13 @@
 import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
 
+// 这是一个纯逻辑服务，不涉及 UI，所以不要加 @MainActor
 class LLMService: NSObject, URLSessionDelegate {
     
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60.0
+        config.timeoutIntervalForRequest = 120.0  // 请求超时 120秒
+        config.timeoutIntervalForResource = 300.0 // 资源超时 5分钟
+        config.waitsForConnectivity = true        // 等待网络连接
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
     
@@ -34,7 +34,8 @@ class LLMService: NSObject, URLSessionDelegate {
         guard let request = buildRequest(baseURL: baseURL, path: "models", apiKey: apiKey, type: .openAI) else { throw URLError(.badURL) }
         let (data, response) = try await session.data(for: request)
         try validateResponse(response, data: data)
-        let list = try JSONDecoder().decode(OpenAIModelListResponse.self, from: data)
+        // 使用文件底部的私有结构体解析
+        let list = try JSONDecoder().decode(PrivateOpenAIModelListResponse.self, from: data)
         return list.data.map { AIModelInfo(id: $0.id, displayName: nil) }.sorted { $0.id < $1.id }
     }
     
@@ -42,7 +43,7 @@ class LLMService: NSObject, URLSessionDelegate {
         guard let request = buildRequest(baseURL: baseURL, path: "models", apiKey: apiKey, type: .gemini) else { throw URLError(.badURL) }
         let (data, response) = try await session.data(for: request)
         try validateResponse(response, data: data)
-        let list = try JSONDecoder().decode(GeminiModelListResponse.self, from: data)
+        let list = try JSONDecoder().decode(PrivateGeminiModelListResponse.self, from: data)
         return list.models.map { m in
             let shortID = m.name.replacingOccurrences(of: "models/", with: "")
             return AIModelInfo(id: shortID, displayName: nil)
@@ -57,18 +58,55 @@ class LLMService: NSObject, URLSessionDelegate {
                     if let imgData = msg.imageData {
                         content = [["type": "text", "text": msg.text], ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(imgData.base64EncodedString())"]]]
                     }
-                    return ["role": msg.role.apiValue, "content": content]
+                    return ["role": msg.role.rawValue, "content": content]
                 }
                 let body: [String: Any] = ["model": modelId, "messages": openAIMessages, "stream": true]
                 guard var req = buildRequest(baseURL: baseURL, path: "chat/completions", apiKey: apiKey, type: .openAI) else { continuation.finish(throwing: URLError(.badURL)); return }
                 req.httpMethod = "POST"
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
                 await performStream(request: req, continuation: continuation) { line in
-                    guard line.hasPrefix("data: ") else { return nil }
+                    guard line.hasPrefix("data: ") else {
+                        // 非 data: 开头的行，可能是其他格式
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "" {
+                            print("⚠️ OpenAI 非标准行: \(line.prefix(200))")
+                            return "[RAW] " + line
+                        }
+                        return nil
+                    }
                     let json = String(line.dropFirst(6))
                     if json.trimmingCharacters(in: .whitespaces) == "[DONE]" { return nil }
-                    if let data = json.data(using: .utf8), let res = try? JSONDecoder().decode(OpenAIStreamResponse.self, from: data) {
-                        return res.choices.first?.delta.content
+                    
+                    // 尝试标准 OpenAI 格式解析
+                    if let data = json.data(using: .utf8), let res = try? JSONDecoder().decode(PrivateOpenAIStreamResponse.self, from: data) {
+                        let delta = res.choices.first?.delta
+                        var result = ""
+                        // 使用特殊前缀标记思考内容：🧠THINK:
+                        if let reasoning = delta?.reasoning_content, !reasoning.isEmpty {
+                            result += "🧠THINK:" + reasoning
+                        }
+                        if let content = delta?.content, !content.isEmpty {
+                            result += content
+                        }
+                        return result.isEmpty ? nil : result
+                    }
+                    
+                    // 解析失败，尝试通用 JSON 解析
+                    if let data = json.data(using: .utf8),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        // 尝试提取常见字段
+                        if let error = dict["error"] as? [String: Any], let message = error["message"] as? String {
+                            return "❌ API错误: " + message
+                        }
+                        // 其他格式：输出原始内容
+                        print("⚠️ OpenAI 未知格式: \(json.prefix(200))")
+                        return "[DEBUG] " + json
+                    }
+                    
+                    // 完全无法解析，返回原始数据
+                    if !json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        print("⚠️ OpenAI 解析失败: \(json.prefix(200))")
+                        return "[PARSE_FAIL] " + json
                     }
                     return nil
                 }
@@ -93,12 +131,38 @@ class LLMService: NSObject, URLSessionDelegate {
                 req.httpMethod = "POST"
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
                 await performStream(request: req, continuation: continuation) { line in
-                    guard line.hasPrefix("data: ") else { return nil }
+                    guard line.hasPrefix("data: ") else {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            print("⚠️ Gemini 非标准行: \(line.prefix(200))")
+                            return "[RAW] " + line
+                        }
+                        return nil
+                    }
                     let json = String(line.dropFirst(6))
-                    if let data = json.data(using: .utf8), let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let candidates = dict["candidates"] as? [[String: Any]], let content = candidates.first?["content"] as? [String: Any],
-                       let parts = content["parts"] as? [[String: Any]], let text = parts.first?["text"] as? String {
-                        return text
+                    
+                    // 尝试标准 Gemini 格式解析
+                    if let data = json.data(using: .utf8), let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        // 检查错误
+                        if let error = dict["error"] as? [String: Any], let message = error["message"] as? String {
+                            return "❌ API错误: " + message
+                        }
+                        // 标准格式
+                        if let candidates = dict["candidates"] as? [[String: Any]], 
+                           let content = candidates.first?["content"] as? [String: Any],
+                           let parts = content["parts"] as? [[String: Any]], 
+                           let text = parts.first?["text"] as? String {
+                            return text
+                        }
+                        // 未知格式，输出原始内容
+                        print("⚠️ Gemini 未知格式: \(json.prefix(200))")
+                        return "[DEBUG] " + json
+                    }
+                    
+                    // 完全无法解析
+                    if !json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        print("⚠️ Gemini 解析失败: \(json.prefix(200))")
+                        return "[PARSE_FAIL] " + json
                     }
                     return nil
                 }
@@ -110,7 +174,7 @@ class LLMService: NSObject, URLSessionDelegate {
         guard let httpResponse = response as? HTTPURLResponse else { return }
         if httpResponse.statusCode != 200 {
             let errorBody = String(data: data, encoding: .utf8) ?? "No body"
-            let msg = "HTTP \(httpResponse.statusCode)"
+            let msg = "HTTP \(httpResponse.statusCode) - \(errorBody.prefix(100))"
             print("❌ API Error: \(msg) | URL: \(httpResponse.url?.absoluteString ?? "")")
             throw NSError(domain: "APIError", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: msg])
         }
@@ -150,4 +214,29 @@ class LLMService: NSObject, URLSessionDelegate {
             continuation.finish()
         } catch { continuation.finish(throwing: error) }
     }
+}
+
+// MARK: - Private Network Response Models
+// 这些结构体是 LLMService 私有的，主线程看不到，因此不会报错
+private struct PrivateOpenAIModelListResponse: Codable {
+    let data: [PrivateOpenAIModel]
+}
+private struct PrivateOpenAIModel: Codable, Identifiable {
+    let id: String
+}
+private struct PrivateOpenAIStreamResponse: Decodable {
+    let choices: [PrivateStreamChoice]
+}
+private struct PrivateStreamChoice: Decodable {
+    let delta: PrivateStreamDelta
+}
+private struct PrivateStreamDelta: Decodable {
+    let content: String?
+    let reasoning_content: String? // 智谱AI等模型的思考内容字段
+}
+private struct PrivateGeminiModelListResponse: Codable {
+    let models: [PrivateGeminiModelRaw]
+}
+private struct PrivateGeminiModelRaw: Codable {
+    let name: String
 }

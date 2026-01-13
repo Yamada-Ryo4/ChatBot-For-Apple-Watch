@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import Combine
+import WatchKit
 
 @MainActor
 class ChatViewModel: ObservableObject {
@@ -14,24 +15,48 @@ class ChatViewModel: ObservableObject {
     @Published var selectedImageItem: PhotosPickerItem? = nil
     @Published var selectedImageData: Data? = nil
     private let service = LLMService()
+    private var currentTask: Task<Void, Never>?
     
+    /// 停止当前生成
+    func stopGeneration() {
+        currentTask?.cancel()
+        currentTask = nil
+        isLoading = false
+    }
     init() {
-        // 使用 v8 强制刷新预设，确保你的修改生效
-        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v8")
+        // 使用 v11 强制刷新预设，内置默认免费模型
+        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v11")
         if hasLoaded, let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
             self.providers = decoded
         } else {
+            // 智谱AI 默认配置，包含免费模型 GLM-4.6V-Flash
+            let zhipuDefaultModel = AIModelInfo(id: "GLM-4.6V-Flash", displayName: "GLM-4.6V-Flash (免费)")
+            let zhipuProvider = ProviderConfig(
+                name: "智谱AI",
+                baseURL: "https://open.bigmodel.cn/api/paas/v4",
+                apiKey: "",
+                isPreset: true,
+                icon: "sparkles",
+                apiType: .openAI,
+                savedModels: [zhipuDefaultModel],
+                isValidated: true
+            )
+            
             self.providers = [
+                zhipuProvider,
                 ProviderConfig(name: "OpenAI (官方)", baseURL: "https://api.openai.com/v1", apiKey: "", isPreset: true, icon: "globe"),
                 ProviderConfig(name: "DeepSeek", baseURL: "https://api.deepseek.com", apiKey: "", isPreset: true, icon: "brain"),
                 ProviderConfig(name: "硅基流动", baseURL: "https://api.siliconflow.cn/v1", apiKey: "", isPreset: true, icon: "cpu"),
-                ProviderConfig(name: "智谱AI", baseURL: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", isPreset: true, icon: "sparkles"),
                 ProviderConfig(name: "阿里云百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", isPreset: true, icon: "cloud"),
                 ProviderConfig(name: "ModelScope", baseURL: "https://api-inference.modelscope.cn/v1", apiKey: "", isPreset: true, icon: "cube"),
                 ProviderConfig(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKey: "", isPreset: true, icon: "network"),
                 ProviderConfig(name: "Gemini", baseURL: "https://gemini.yamadaryo.me", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini)
             ]
-            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v8")
+            
+            // 自动选择智谱AI的默认模型
+            selectedGlobalModelID = "\(zhipuProvider.id.uuidString)|\(zhipuDefaultModel.id)"
+            
+            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v11")
             saveProviders()
         }
         if let data = UserDefaults.standard.data(forKey: "chatSessions_v1"), let decoded = try? JSONDecoder().decode([ChatSession].self, from: data) { self.sessions = decoded.sorted(by: { $0.lastModified > $1.lastModified }) }
@@ -147,31 +172,106 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
         
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
+        WKInterfaceDevice.current().play(.click) // 开始生成震动
         msgs.append(ChatMessage(role: .assistant, text: ""))
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
-        Task {
+        currentTask = Task {
             let history = msgs.dropLast(1).suffix(10).map { $0 }
             var responseText = ""
+            var thinkingText = ""
             do {
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
                 for try await chunk in stream {
-                    responseText += chunk
+                    // 检查是否被取消
+                    if Task.isCancelled { break }
+                    
+                    // 解析思考内容（使用 🧠THINK: 前缀标记）
+                    var remainingChunk = chunk
+                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
+                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
+                        if !beforeThink.isEmpty {
+                            responseText += beforeThink
+                        }
+                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
+                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
+                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
+                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
+                        } else {
+                            thinkingText += remainingChunk
+                            remainingChunk = ""
+                        }
+                    }
+                    if !remainingChunk.isEmpty {
+                        responseText += remainingChunk
+                    }
+                    
+                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
+                    let finalThinking = thinkingText + (parsedThinking ?? "")
+                    let finalContent = parsedContent
+                    
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        currentMsgs[botIndex].text = responseText
+                        currentMsgs[botIndex].text = finalContent
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
                         updateCurrentSessionMessages(currentMsgs)
+                        
+                        // 轻微触觉反馈 (每收到一部分内容震动太频繁，这里可以不加，或者仅在思考结束时加)
+                        // WKInterfaceDevice.current().play(.click) 
                     }
                 }
+                // 生成完成：成功震动
+                WKInterfaceDevice.current().play(.success)
             } catch {
-                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                // 如果是取消错误，标记为用户停止
+                if Task.isCancelled {
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        if !currentMsgs[botIndex].text.isEmpty {
+                            currentMsgs[botIndex].text += "\n[已停止]"
+                        }
+                        updateCurrentSessionMessages(currentMsgs)
+                    }
+                    // 停止震动 (使用 click 或 directionDown)
+                    WKInterfaceDevice.current().play(.directionDown)
+                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
                     else { currentMsgs[botIndex].text += "\n[中断]" }
                     updateCurrentSessionMessages(currentMsgs)
+                    // 错误震动
+                    WKInterfaceDevice.current().play(.failure)
                 }
             }
             isLoading = false
+            currentTask = nil
         }
+    }
+    
+    /// 解析 <think>...</think> 标签，返回 (思考内容, 剩余内容)
+    private func parseThinkTags(_ text: String) -> (thinking: String?, content: String) {
+        var thinking = ""
+        var content = text
+        
+        // 匹配 <think> 和 </think> 标签（包括未闭合的情况）
+        let openTag = "<think>"
+        let closeTag = "</think>"
+        
+        while let openRange = content.range(of: openTag, options: .caseInsensitive) {
+            let beforeThink = String(content[..<openRange.lowerBound])
+            let afterOpen = String(content[openRange.upperBound...])
+            
+            if let closeRange = afterOpen.range(of: closeTag, options: .caseInsensitive) {
+                // 找到闭合标签
+                thinking += String(afterOpen[..<closeRange.lowerBound])
+                content = beforeThink + String(afterOpen[closeRange.upperBound...])
+            } else {
+                // 未闭合，剩余部分都是思考内容（流式场景）
+                thinking += afterOpen
+                content = beforeThink
+                break
+            }
+        }
+        
+        return (thinking.isEmpty ? nil : thinking, content)
     }
     
     func appendSystemMessage(_ text: String) {
@@ -181,6 +281,87 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
     }
     func clearCurrentChat() { updateCurrentSessionMessages([]) }
+    
+    /// 重新生成最后一条回复
+    func regenerateLastMessage() {
+        guard !isLoading else { return }
+        var msgs = currentMessages
+        
+        // 移除最后一条 assistant 消息
+        while let last = msgs.last, last.role == .assistant {
+            msgs.removeLast()
+        }
+        
+        // 找到最后一条 user 消息
+        guard let lastUserMsg = msgs.last, lastUserMsg.role == .user else { return }
+        
+        // 重新发送
+        let components = selectedGlobalModelID.split(separator: "|")
+        guard components.count == 2, 
+              let providerID = UUID(uuidString: String(components[0])),
+              let modelID = String(components[1]) as String?,
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return }
+        
+        updateCurrentSessionMessages(msgs)
+        isLoading = true
+        msgs.append(ChatMessage(role: .assistant, text: ""))
+        updateCurrentSessionMessages(msgs)
+        let botIndex = msgs.count - 1
+        
+        currentTask = Task {
+            let history = msgs.dropLast(1).suffix(10).map { $0 }
+            var responseText = ""
+            var thinkingText = ""
+            do {
+                let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
+                for try await chunk in stream {
+                    if Task.isCancelled { break }
+                    
+                    var remainingChunk = chunk
+                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
+                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
+                        if !beforeThink.isEmpty { responseText += beforeThink }
+                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
+                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
+                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
+                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
+                        } else {
+                            thinkingText += remainingChunk
+                            remainingChunk = ""
+                        }
+                    }
+                    if !remainingChunk.isEmpty { responseText += remainingChunk }
+                    
+                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
+                    let finalThinking = thinkingText + (parsedThinking ?? "")
+                    let finalContent = parsedContent
+                    
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        currentMsgs[botIndex].text = finalContent
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                        updateCurrentSessionMessages(currentMsgs)
+                    }
+                }
+            } catch {
+                if Task.isCancelled {
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        if !currentMsgs[botIndex].text.isEmpty {
+                            currentMsgs[botIndex].text += "\n[已停止]"
+                        }
+                        updateCurrentSessionMessages(currentMsgs)
+                    }
+                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
+                    else { currentMsgs[botIndex].text += "\n[中断]" }
+                    updateCurrentSessionMessages(currentMsgs)
+                }
+            }
+            isLoading = false
+            currentTask = nil
+        }
+    }
+    
     func loadImage() {
         Task { if let data = try? await selectedImageItem?.loadTransferable(type: Data.self), let uiImage = UIImage(data: data) { self.selectedImageData = uiImage.jpegData(compressionQuality: 0.5) } }
     }
