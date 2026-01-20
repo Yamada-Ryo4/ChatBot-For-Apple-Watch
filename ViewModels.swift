@@ -7,11 +7,14 @@ import WatchKit
 class ChatViewModel: ObservableObject {
     @AppStorage("savedProviders_v3") var savedProvidersData: Data = Data()
     @AppStorage("selectedGlobalModelID") var selectedGlobalModelID: String = ""
+    @AppStorage("showModelNameInNavBar") var showModelNameInNavBar: Bool = true  // 显示顶部模型名称
+    @AppStorage("showScrollToBottomButton") var showScrollToBottomButton: Bool = true  // 显示回到底部按钮
     @Published var providers: [ProviderConfig] = []
     @Published var sessions: [ChatSession] = []
     @Published var currentSessionId: UUID?
     @Published var inputText: String = ""
     @Published var isLoading: Bool = false
+    @Published var isInputVisible: Bool = true  // 输入框是否可见（用于显示回到底部按钮）
     @Published var selectedImageItem: PhotosPickerItem? = nil
     @Published var selectedImageData: Data? = nil
     private let service = LLMService()
@@ -39,7 +42,7 @@ class ChatViewModel: ObservableObject {
                 icon: "sparkles",
                 apiType: .openAI,
                 savedModels: [zhipuDefaultModel],
-                isValidated: true
+                isValidated: false
             )
             
             self.providers = [
@@ -56,7 +59,7 @@ class ChatViewModel: ObservableObject {
             // 自动选择智谱AI的默认模型
             selectedGlobalModelID = "\(zhipuProvider.id.uuidString)|\(zhipuDefaultModel.id)"
             
-            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v11")
+            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v13")
             saveProviders()
         }
         if let data = UserDefaults.standard.data(forKey: "chatSessions_v1"), let decoded = try? JSONDecoder().decode([ChatSession].self, from: data) { self.sessions = decoded.sorted(by: { $0.lastModified > $1.lastModified }) }
@@ -84,13 +87,20 @@ class ChatViewModel: ObservableObject {
         guard let sessionId = currentSessionId, let session = sessions.first(where: { $0.id == sessionId }) else { return [] }
         return session.messages
     }
+    
+    /// 更新消息并保存到磁盘（用于非频繁操作）
     private func updateCurrentSessionMessages(_ newMessages: [ChatMessage]) {
+        updateCurrentSessionMessagesInMemory(newMessages)
+        saveSessions()
+    }
+    
+    /// 仅更新内存中的消息（不写磁盘，用于流式输出）
+    private func updateCurrentSessionMessagesInMemory(_ newMessages: [ChatMessage]) {
         guard let index = sessions.firstIndex(where: { $0.id == currentSessionId }) else { return }
         sessions[index].messages = newMessages
         sessions[index].lastModified = Date()
         if newMessages.count == 1, let firstText = newMessages.first?.text, !firstText.isEmpty { sessions[index].title = String(firstText.prefix(10)) }
         sessions.sort(by: { $0.lastModified > $1.lastModified })
-        saveSessions()
     }
     
     // MARK: - 供应商与模型逻辑
@@ -139,19 +149,39 @@ class ChatViewModel: ObservableObject {
         }
         return list
     }
+    // 缓存模型名称，避免重复计算
+    private var _cachedModelName: String?
+    private var _cachedModelID: String?
     
     var currentDisplayModelName: String {
-        if selectedGlobalModelID.isEmpty { return "ChatBot" }
-        let components = selectedGlobalModelID.split(separator: "|")
-        if components.count == 2 {
-            if let found = allFavoriteModels.first(where: { $0.id == selectedGlobalModelID }) {
-                let parts = found.displayName.split(separator: "/")
-                if parts.count >= 2 { return String(parts.last!).trimmingCharacters(in: .whitespaces) }
-                return found.displayName
-            }
-            return String(components[1])
+        // 检查缓存是否有效
+        if _cachedModelID == selectedGlobalModelID, let cached = _cachedModelName {
+            return cached
         }
-        return "ChatBot"
+        
+        // 计算新值
+        let result: String
+        if selectedGlobalModelID.isEmpty { 
+            result = "ChatBot"
+        } else {
+            let components = selectedGlobalModelID.split(separator: "|")
+            if components.count == 2 {
+                if let found = allFavoriteModels.first(where: { $0.id == selectedGlobalModelID }) {
+                    let parts = found.displayName.split(separator: "/")
+                    if parts.count >= 2 { result = String(parts.last!).trimmingCharacters(in: .whitespaces) }
+                    else { result = found.displayName }
+                } else {
+                    result = String(components[1])
+                }
+            } else {
+                result = "ChatBot"
+            }
+        }
+        
+        // 更新缓存
+        _cachedModelID = selectedGlobalModelID
+        _cachedModelName = result
+        return result
     }
     
     func sendMessage() {
@@ -214,12 +244,14 @@ class ChatViewModel: ObservableObject {
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                         currentMsgs[botIndex].text = finalContent
                         currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        updateCurrentSessionMessages(currentMsgs)
+                        updateCurrentSessionMessagesInMemory(currentMsgs) // 流式输出时仅更新内存
                         
                         // 轻微触觉反馈 (每收到一部分内容震动太频繁，这里可以不加，或者仅在思考结束时加)
                         // WKInterfaceDevice.current().play(.click) 
                     }
                 }
+                // 流式输出完成后，一次性保存到磁盘
+                saveSessions()
                 // 生成完成：成功震动
                 WKInterfaceDevice.current().play(.success)
             } catch {
@@ -229,14 +261,16 @@ class ChatViewModel: ObservableObject {
                         if !currentMsgs[botIndex].text.isEmpty {
                             currentMsgs[botIndex].text += "\n[已停止]"
                         }
-                        updateCurrentSessionMessages(currentMsgs)
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
+                    saveSessions() // 停止后保存
                     // 停止震动 (使用 click 或 directionDown)
                     WKInterfaceDevice.current().play(.directionDown)
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
                     else { currentMsgs[botIndex].text += "\n[中断]" }
-                    updateCurrentSessionMessages(currentMsgs)
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
+                    saveSessions() // 错误后保存
                     // 错误震动
                     WKInterfaceDevice.current().play(.failure)
                 }
@@ -363,6 +397,12 @@ class ChatViewModel: ObservableObject {
     }
     
     func loadImage() {
-        Task { if let data = try? await selectedImageItem?.loadTransferable(type: Data.self), let uiImage = UIImage(data: data) { self.selectedImageData = uiImage.jpegData(compressionQuality: 0.5) } }
+        Task {
+            if let data = try? await selectedImageItem?.loadTransferable(type: Data.self),
+               let uiImage = UIImage(data: data) {
+                // 仅做 JPEG 压缩，保持原始尺寸（保留小文字清晰度）
+                self.selectedImageData = uiImage.jpegData(compressionQuality: 0.5)
+            }
+        }
     }
 }

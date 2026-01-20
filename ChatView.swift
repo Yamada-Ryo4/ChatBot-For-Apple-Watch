@@ -5,6 +5,7 @@ struct ChatView: View {
     @StateObject var viewModel = ChatViewModel()
     @Namespace private var bottomID
     @State private var showHistory = false
+    @State private var isAtBottom = true
     
     var body: some View {
         NavigationStack {
@@ -21,7 +22,6 @@ struct ChatView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 PrettyMessageBubble(message: msg)
                                 
-                                // 在最后一条 AI 回复下方显示重新生成按钮
                                 if msg.role == .assistant && 
                                    msg.id == viewModel.currentMessages.last?.id && 
                                    !viewModel.isLoading && 
@@ -49,35 +49,71 @@ struct ChatView: View {
                             .id(msg.id)
                         }
                         
+                        // 输入区域
                         BottomInputArea(viewModel: viewModel)
                             .id(bottomID)
                             .padding(.top, 8)
                             .padding(.bottom, 8)
                             .frame(maxWidth: .infinity, alignment: .center)
+                        
+                        // 底部检测线
+                        GeometryReader { geo in
+                            Color.clear
+                                .preference(
+                                    key: BottomOffsetPreferenceKey.self,
+                                    value: geo.frame(in: .global).minY
+                                )
+                        }
+                        .frame(height: 1)
                     }
                     .padding(.horizontal, 8)
                 }
-                .defaultScrollAnchor(.bottom) // WatchOS 10+ 特性，自动保持在底部
+                .defaultScrollAnchor(.bottom)
+                .onPreferenceChange(BottomOffsetPreferenceKey.self) { minY in
+                    let screenHeight = WKInterfaceDevice.current().screenBounds.height
+                    let isVisible = minY < screenHeight + 50
+                    if isAtBottom != isVisible {
+                        isAtBottom = isVisible
+                    }
+                }
                 .onChange(of: viewModel.currentMessages.count) { _, _ in
-                    // 仅在新消息添加时滚动
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(bottomID, anchor: .bottom)
                     }
                 }
                 .onAppear {
-                    // 初始加载滚动到底部
                     proxy.scrollTo(bottomID, anchor: .bottom)
                 }
+                // 使用 overlay 而非 ZStack，确保按钮在独立的触摸层
+                .overlay(alignment: .bottom) {
+                    if viewModel.showScrollToBottomButton && !isAtBottom && viewModel.currentMessages.count > 2 {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.3)) {
+                                proxy.scrollTo(bottomID, anchor: .bottom)
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.blue)
+                                .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                                .frame(width: 60, height: 44) // 扩大触控区域
+                                .contentShape(Rectangle())   // 整个区域可点击
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 4)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                    }
+                }
             }
-            .navigationTitle(viewModel.currentDisplayModelName)
+            .navigationTitle(viewModel.showModelNameInNavBar ? viewModel.currentDisplayModelName : "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     NavigationLink(destination: SettingsView(viewModel: viewModel)) {
                         Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 16, weight: .bold)) // Bolder
+                            .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.gray)
-                            .frame(width: 44, height: 44) // Large touch target
+                            .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -85,12 +121,12 @@ struct ChatView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showHistory = true } label: {
                         Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 16, weight: .bold)) // Slightly bolder
+                            .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.blue)
-                            .frame(width: 44, height: 44) // Explicit large touch target
-                            .contentShape(Rectangle()) // Ensure entire frame is tappable
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain) // Ensure no default style shrinking
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -99,6 +135,17 @@ struct ChatView: View {
         }
     }
 }
+
+
+
+// 底部检测偏移量 PreferenceKey
+struct BottomOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
  
 // 底部输入区域 (复用代码)
 struct BottomInputArea: View {
@@ -286,8 +333,9 @@ struct PrettyMessageBubble: View {
                             .padding(.top, 4)
                         }
                     }
+
                     .padding(10)
-                    .background(message.role == .user ? Color.blue : Color.gray.opacity(0.3))
+                    .background(message.role == .user ? Color.green : Color.gray.opacity(0.3))
                     .cornerRadius(12)
                     .foregroundColor(.white)
                 }

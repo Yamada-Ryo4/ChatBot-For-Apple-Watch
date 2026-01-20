@@ -63,6 +63,13 @@ struct SettingsView: View {
                 }
             }
             
+            Section(header: Text("界面设置")) {
+                Toggle("显示模型名称", isOn: $viewModel.showModelNameInNavBar)
+                    .font(.system(size: 14))
+                Toggle("显示回底部按钮", isOn: $viewModel.showScrollToBottomButton)
+                    .font(.system(size: 14))
+            }
+            
             Section {
                 Button("清空聊天记录", role: .destructive) { viewModel.clearCurrentChat() }
             }
