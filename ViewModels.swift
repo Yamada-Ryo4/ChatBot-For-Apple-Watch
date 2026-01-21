@@ -62,7 +62,15 @@ class ChatViewModel: ObservableObject {
             UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v13")
             saveProviders()
         }
-        if let data = UserDefaults.standard.data(forKey: "chatSessions_v1"), let decoded = try? JSONDecoder().decode([ChatSession].self, from: data) { self.sessions = decoded.sorted(by: { $0.lastModified > $1.lastModified }) }
+        if let data = UserDefaults.standard.data(forKey: "chatSessions_v1") {
+            do {
+                let decoded = try JSONDecoder().decode([ChatSession].self, from: data)
+                self.sessions = decoded.sorted(by: { $0.lastModified > $1.lastModified })
+            } catch {
+                print("⚠️ Failed to decode chat sessions: \(error)")
+                self.sessions = []
+            }
+        }
         if sessions.isEmpty { createNewSession() }
         else if currentSessionId == nil { currentSessionId = sessions.first?.id }
     }

@@ -52,7 +52,7 @@ class LLMService: NSObject, URLSessionDelegate {
     
     private func streamOpenAIChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 let openAIMessages: [[String: Any]] = messages.map { msg in
                     var content: Any = msg.text
                     if let imgData = msg.imageData {
@@ -111,12 +111,13 @@ class LLMService: NSObject, URLSessionDelegate {
                     return nil
                 }
             }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
     
     private func streamGeminiChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 let contents: [[String: Any]] = messages.map { msg in
                     var parts: [[String: Any]] = []
                     if let imgData = msg.imageData { parts.append(["inline_data": ["mime_type": "image/jpeg", "data": imgData.base64EncodedString()]]) }
@@ -167,6 +168,7 @@ class LLMService: NSObject, URLSessionDelegate {
                     return nil
                 }
             }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
 

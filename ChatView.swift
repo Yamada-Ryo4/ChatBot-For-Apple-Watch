@@ -2,6 +2,7 @@ import SwiftUI
 import PhotosUI
 
 struct ChatView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject var viewModel = ChatViewModel()
     @Namespace private var bottomID
     @State private var showHistory = false
@@ -132,6 +133,11 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showHistory) {
             HistoryListView(viewModel: viewModel, isPresented: $showHistory)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .inactive || newPhase == .background {
+                viewModel.stopGeneration()
+            }
         }
     }
 }
