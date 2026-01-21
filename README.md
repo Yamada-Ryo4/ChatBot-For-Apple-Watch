@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat" alt="License">
 </p>
 
-**ChatBot for Apple Watch** 是一个专为 Apple Watch 设计的现代化、全功能大语言模型（LLM）客户端。
+**ChatBot for Apple Watch** 是首个专为 Apple Watch 设计的现代化、全功能大语言模型（LLM）客户端。
 
 它打破了单一模型应用的限制，构建了一个通用的 AI 交互平台。无论您是习惯使用 **OpenAI**、**Google Gemini**，还是偏好国内的 **DeepSeek**、**智谱 AI**、**通义千问**，亦或是自建的 **Ollama** 服务，都可以通过此 App 在手腕上无缝调用。
 
@@ -31,7 +31,6 @@ App 采用原生的 SwiftUI 构建，针对 watchOS 的小屏幕进行了深度�
     * 阿里云百炼 (通义千问 / Qwen)
     * 硅基流动 (SiliconFlow)
     * 魔搭社区 (ModelScope)
-    * CherryIN
 
 ### 🛠️ 高度可定制化
 * **自定义 Base URL**: 轻松连接自建代理（如 OneAPI、NewAPI）或企业内部的中转服务。
@@ -44,12 +43,13 @@ App 采用原生的 SwiftUI 构建，针对 watchOS 的小屏幕进行了深度�
 
 ## 🚀 安装与运行
 
-由于本项目是一个开源客户端，您需要通过 Xcode 编译安装到您的手表上。
+* 由于本项目是一个开源客户端，您需要通过 Xcode 编译安装到您的手表上。
+* Release中提供了ipa安装包可供安装
 
 ### 环境要求
 * **macOS**: 运行 macOS Sonoma 或更高版本。
 * **Xcode**: 15.0+ (建议使用最新版本)。
-* **watchOS**: 10.0+ (项目使用了 watchOS 10 的最新 SwiftUI API，不支持旧版本)。
+* **watchOS**: 11.5+ (项目使用了 watchOS 10 的最新 SwiftUI API，不支持旧版本，性能占用较大，建议使用s7以上设备)。
 * **Swift**: 5.9+。
 
 ### 编译步骤
