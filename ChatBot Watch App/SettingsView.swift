@@ -28,20 +28,20 @@ struct SettingsView: View {
             }
             
             Section(header: Text("供应商配置")) {
-                // 使用 indices 遍历，保持原有的 Binding 修复逻辑
-                ForEach(viewModel.providers.indices, id: \.self) { index in
+                // 使用 Binding 集合遍历，解决输入焦点丢失问题
+                ForEach($viewModel.providers) { $provider in
                     NavigationLink {
-                        ProviderDetailView(config: $viewModel.providers[index], viewModel: viewModel)
+                        ProviderDetailView(config: $provider, viewModel: viewModel)
                     } label: {
                         HStack {
-                            Image(systemName: viewModel.providers[index].icon)
+                            Image(systemName: provider.icon)
                                 .frame(width: 20)
-                                .foregroundColor(viewModel.providers[index].isPreset ? .blue : .orange)
+                                .foregroundColor(provider.isPreset ? .blue : .orange)
                             VStack(alignment: .leading) {
-                                Text(viewModel.providers[index].name)
-                                if viewModel.providers[index].isValidated {
-                                    Text("已验证 • \(viewModel.providers[index].savedModels.count) 模型").font(.caption2).foregroundColor(.green)
-                                } else if !viewModel.providers[index].apiKey.isEmpty {
+                                Text(provider.name)
+                                if provider.isValidated {
+                                    Text("已验证 • \(provider.savedModels.count) 模型").font(.caption2).foregroundColor(.green)
+                                } else if !provider.apiKey.isEmpty {
                                     Text("未验证").font(.caption2).foregroundColor(.orange)
                                 } else {
                                     Text("无 Key").font(.caption2).foregroundColor(.gray)
@@ -104,39 +104,47 @@ struct ProviderDetailView: View {
     @State private var fetchError: String? = nil
     @State private var fetchedOnlineModels: [AIModelInfo] = []
     
+    //引入本地临时状态，防止输入过程中触发父视图刷新导致键盘断连
+    @State private var draftConfig: ProviderConfig = ProviderConfig(name: "", baseURL: "", apiKey: "", isPreset: false, icon: "")
+    
     var body: some View {
         Form {
             Section(header: Text("连接信息")) {
-                if !config.isPreset {
-                    TextField("名称", text: $config.name)
-                    Picker("类型", selection: $config.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
+                if !draftConfig.isPreset {
+                    TextField("名称", text: $draftConfig.name)
+                    Picker("类型", selection: $draftConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
                 } else {
-                    HStack { Text("类型"); Spacer(); Text(config.apiType.rawValue).foregroundColor(.gray) }
+                    HStack { Text("类型"); Spacer(); Text(draftConfig.apiType.rawValue).foregroundColor(.gray) }
                 }
                 VStack(alignment: .leading) {
                     Text("Base URL").font(.caption).foregroundColor(.gray)
-                    TextField("https://...", text: $config.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
+                    TextField("https://...", text: $draftConfig.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
                 }
                 VStack(alignment: .leading) {
                     Text("API Key").font(.caption).foregroundColor(.gray)
-                    TextField("sk-...", text: $config.apiKey).textInputAutocapitalization(.never).disableAutocorrection(true)
+                    // 使用 SecureField 并绑定到本地 draftConfig
+                    SecureField("sk-...", text: $draftConfig.apiKey)
+                        .textContentType(.password)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
                 }
             }
             
             Section(header: Text("模型管理")) {
                 NavigationLink {
-                    AddCustomModelView(viewModel: viewModel, providerID: config.id)
+                    // 注意：这里传递的是 config.id 还是 draftConfig.id 由逻辑决定，通常 id 不变
+                    AddCustomModelView(viewModel: viewModel, providerID: draftConfig.id)
                 } label: {
                     Label("手动添加自定义模型", systemImage: "plus.square.dashed").foregroundColor(.blue)
                 }
                 
-                if config.apiKey.isEmpty {
+                if draftConfig.apiKey.isEmpty {
                     Text("请先填写 API Key").font(.caption).foregroundColor(.gray)
                 } else {
                     Button { validateAndFetch() } label: {
                         HStack {
                             Text(isFetching ? "正在获取..." : "获取在线模型列表")
-                            if config.isValidated && !isFetching { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
+                            if draftConfig.isValidated && !isFetching { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
                         }
                     }
                     .disabled(isFetching)
@@ -144,18 +152,18 @@ struct ProviderDetailView: View {
                 }
             }
             
-            if !fetchedOnlineModels.isEmpty || !config.savedModels.isEmpty {
+            if !fetchedOnlineModels.isEmpty || !draftConfig.savedModels.isEmpty {
                 Section(header: Text("可用模型 (点击收藏)")) {
                     let displayModels = mergeModels()
                     ForEach(displayModels) { model in
-                        Button { viewModel.toggleModelFavorite(providerID: config.id, model: model) } label: {
+                        Button { toggleDraftModelFavorite(model: model) } label: {
                             HStack {
                                 VStack(alignment: .leading) {
                                     Text(model.id).font(.caption)
                                     if let display = model.displayName { Text(display).font(.caption2).foregroundColor(.blue) }
                                 }
                                 Spacer()
-                                if config.savedModels.contains(where: { $0.id == model.id }) { Image(systemName: "star.fill").foregroundColor(.yellow) }
+                                if draftConfig.savedModels.contains(where: { $0.id == model.id }) { Image(systemName: "star.fill").foregroundColor(.yellow) }
                                 else { Image(systemName: "star").foregroundColor(.gray) }
                             }
                         }
@@ -163,29 +171,53 @@ struct ProviderDetailView: View {
                 }
             }
         }
-        .navigationTitle(config.name)
-        .onDisappear { viewModel.saveProviders() }
+        .navigationTitle(draftConfig.name.isEmpty ? config.name : draftConfig.name)
+        .onAppear {
+            self.draftConfig = config
+        }
+        .onDisappear {
+            // 退出页面时将修改同步回 ViewModel
+            self.config = draftConfig
+            viewModel.saveProviders()
+        }
+    }
+    
+    // 需要针对 draftConfig 的本地收藏逻辑
+    func toggleDraftModelFavorite(model: AIModelInfo) {
+        if let index = draftConfig.savedModels.firstIndex(where: { $0.id == model.id }) {
+            draftConfig.savedModels.remove(at: index)
+        } else {
+            draftConfig.savedModels.append(model)
+        }
     }
     
     func mergeModels() -> [AIModelInfo] {
         var set = Set<String>()
-        var result = config.savedModels
+        var result = draftConfig.savedModels
         for m in result { set.insert(m.id) }
         for m in fetchedOnlineModels { if !set.contains(m.id) { result.append(m) } }
         return result.sorted { $0.id < $1.id }
     }
     
     func validateAndFetch() {
-        guard !config.apiKey.isEmpty else { return }
+        guard !draftConfig.apiKey.isEmpty else { return }
         isFetching = true; fetchError = nil
         let service = LLMService()
-        let cfg = config
+        let cfg = draftConfig
         Task {
             do {
                 let models = try await service.fetchModels(config: cfg)
-                await MainActor.run { self.fetchedOnlineModels = models; self.config.isValidated = true; self.isFetching = false }
+                await MainActor.run { 
+                    self.fetchedOnlineModels = models
+                    self.draftConfig.isValidated = true 
+                    self.isFetching = false 
+                }
             } catch {
-                await MainActor.run { self.fetchError = "失败: \(error.localizedDescription)"; self.config.isValidated = false; self.isFetching = false }
+                await MainActor.run { 
+                    self.fetchError = "失败: \(error.localizedDescription)"
+                    self.draftConfig.isValidated = false 
+                    self.isFetching = false 
+                }
             }
         }
     }
