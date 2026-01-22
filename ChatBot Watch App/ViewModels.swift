@@ -28,7 +28,7 @@ class ChatViewModel: ObservableObject {
     }
     init() {
         // 使用 v11 强制刷新预设，内置默认免费模型
-        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v12")
+        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v13")
         if hasLoaded, let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
             self.providers = decoded
         } else {
@@ -411,6 +411,105 @@ class ChatViewModel: ObservableObject {
                 // 仅做 JPEG 压缩，保持原始尺寸（保留小文字清晰度）
                 self.selectedImageData = uiImage.jpegData(compressionQuality: 0.5)
             }
+        }
+    }
+    
+    // MARK: - 消息编辑逻辑
+    @Published var editingMessageID: UUID?
+    @Published var editingText: String = ""
+    
+    func startEditing(message: ChatMessage) {
+        stopGeneration() // 假如正在生成，先停止
+        editingMessageID = message.id
+        editingText = message.text
+    }
+    
+    func cancelEditing() {
+        editingMessageID = nil
+        editingText = ""
+    }
+    
+    func submitEdit() {
+        guard let editingID = editingMessageID, !editingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        
+        var msgs = currentMessages
+        guard let index = msgs.firstIndex(where: { $0.id == editingID }) else { return }
+        
+        // 1. 更新该条消息文本
+        msgs[index].text = editingText
+        
+        // 2. 移除该条消息之后的所有消息（清除旧的上下文和回复）
+        if index < msgs.count - 1 {
+            msgs.removeSubrange((index + 1)...)
+        }
+        
+        // 3. 准备重新生成
+        updateCurrentSessionMessages(msgs)
+        cancelEditing() // 退出编辑模式
+        
+        // 4. 触发生成逻辑
+        let components = selectedGlobalModelID.split(separator: "|")
+        guard components.count == 2,
+              let providerID = UUID(uuidString: String(components[0])),
+              let modelID = String(components[1]) as String?,
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return }
+        
+        isLoading = true
+        msgs.append(ChatMessage(role: .assistant, text: ""))
+        updateCurrentSessionMessages(msgs)
+        let botIndex = msgs.count - 1
+        
+        currentTask = Task {
+            let history = msgs.dropLast(1).suffix(10).map { $0 }
+            var responseText = ""
+            var thinkingText = ""
+            do {
+                let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
+                for try await chunk in stream {
+                    if Task.isCancelled { break }
+                    
+                    var remainingChunk = chunk
+                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
+                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
+                        if !beforeThink.isEmpty { responseText += beforeThink }
+                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
+                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
+                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
+                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
+                        } else {
+                            thinkingText += remainingChunk
+                            remainingChunk = ""
+                        }
+                    }
+                    if !remainingChunk.isEmpty { responseText += remainingChunk }
+                    
+                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
+                    let finalThinking = thinkingText + (parsedThinking ?? "")
+                    let finalContent = parsedContent
+                    
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        currentMsgs[botIndex].text = finalContent
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                        updateCurrentSessionMessages(currentMsgs)
+                    }
+                }
+            } catch {
+                if Task.isCancelled {
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        if !currentMsgs[botIndex].text.isEmpty {
+                            currentMsgs[botIndex].text += "\n[已停止]"
+                        }
+                        updateCurrentSessionMessages(currentMsgs)
+                    }
+                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
+                    else { currentMsgs[botIndex].text += "\n[中断]" }
+                    updateCurrentSessionMessages(currentMsgs)
+                }
+            }
+            isLoading = false
+            currentTask = nil
         }
     }
 }

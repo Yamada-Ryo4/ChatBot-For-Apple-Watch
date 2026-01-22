@@ -21,12 +21,47 @@ struct ChatView: View {
                         
                         ForEach(viewModel.currentMessages) { msg in
                             VStack(alignment: .leading, spacing: 4) {
-                                PrettyMessageBubble(message: msg)
                                 
-                                if msg.role == .assistant &&
-                                   msg.id == viewModel.currentMessages.last?.id &&
-                                   !viewModel.isLoading &&
-                                   !msg.text.isEmpty {
+                                // 编辑模式 UI
+                                if viewModel.editingMessageID == msg.id {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        TextField("编辑消息", text: $viewModel.editingText)
+                                            .textFieldStyle(.plain)
+                                            .padding(8)
+                                            .background(Color.gray.opacity(0.2))
+                                            .cornerRadius(8)
+                                        
+                                        HStack {
+                                            Button(action: { withAnimation { viewModel.cancelEditing() } }) {
+                                                Image(systemName: "xmark.circle.fill")
+                                                    .font(.title3)
+                                                    .foregroundColor(.gray)
+                                            }
+                                            .buttonStyle(.plain)
+                                            
+                                            Spacer()
+                                            
+                                            Button(action: { withAnimation { viewModel.submitEdit() } }) {
+                                                Image(systemName: "arrow.up.circle.fill")
+                                                    .font(.title3)
+                                                    .foregroundColor(.green)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .disabled(viewModel.editingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                        }
+                                    }
+                                    .padding(8)
+                                    .background(Color.gray.opacity(0.1))
+                                    .cornerRadius(12)
+                                    
+                                } else {
+                                    // 正常显示模式
+                                    PrettyMessageBubble(message: msg)
+                                    
+                                    if msg.role == .assistant &&
+                                       msg.id == viewModel.currentMessages.last?.id &&
+                                       !viewModel.isLoading &&
+                                       !msg.text.isEmpty {
                                     HStack {
                                         Button(action: { viewModel.regenerateLastMessage() }) {
                                             HStack(spacing: 4) {
@@ -45,6 +80,49 @@ struct ChatView: View {
                                         Spacer()
                                     }
                                     .padding(.leading, 4)
+                                }
+                                
+                                // 新增：如果是最后一条用户消息，且当前没有在生成，显示重新生成按钮
+                                if msg.role == .user &&
+                                   !viewModel.isLoading &&
+                                   msg.id == viewModel.currentMessages.last(where: { $0.role == .user })?.id {
+                                    HStack {
+                                        Spacer()
+                                        
+                                        // 编辑按钮
+                                        Button(action: { withAnimation { viewModel.startEditing(message: msg) } }) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "pencil")
+                                                    .font(.system(size: 11))
+                                                Text("编辑")
+                                                    .font(.system(size: 11))
+                                            }
+                                            .foregroundColor(.blue)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.blue.opacity(0.15))
+                                            .cornerRadius(8)
+                                        }
+                                        .buttonStyle(.plain)
+                                        
+                                        // 重新生成按钮
+                                        Button(action: { viewModel.regenerateLastMessage() }) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "arrow.clockwise")
+                                                    .font(.system(size: 11))
+                                                Text("重试") // 缩短文案以节省空间
+                                                    .font(.system(size: 11))
+                                            }
+                                            .foregroundColor(.blue)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.blue.opacity(0.15))
+                                            .cornerRadius(8)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.trailing, 4)
+                                }
                                 }
                             }
                             .id(msg.id)
