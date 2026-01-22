@@ -12,105 +12,86 @@
 
 App 采用原生的 SwiftUI 构建，针对 watchOS 的小屏幕进行了深度交互优化，支持流式响应、多模态输入以及高度的个性化配置，是您腕上的全能 AI 助手。
 
-## ✨ 核心功能
+## ✨ 全功能特性 (Feature Highlights)
 
-### 🚀 极致体验
-* **⚡️ 极速流式响应 (Streaming)**: 采用 Server-Sent Events (SSE) 技术，像打字机一样实时显示 AI 回复，拒绝转圈等待，提供丝滑的对话体验。
-* **🖼️ 多模态视觉支持**: 支持从手表相册选择图片发送给 AI 进行分析（需模型本身支持 Vision 能力，如 GPT-4o, Gemini Pro Vision 等）。
-* **📝 原生 Markdown 渲染**: 完美支持粗体、斜体、列表、代码块，甚至可以直接渲染 AI 返回的 **Markdown 图片链接**。
+### � 极致对话体验
+* **⚡️ 极速流式响应 (Streaming)**: 采用 Server-Sent Events (SSE) 技术，像打字机一样实时显示 AI 回复，拒绝转圈等待。
+* **✏️ 行内消息编辑 (Inline Edit)**: 发错消息不用重来！直接在气泡上点击编辑按钮，修改后 AI 会自动根据新内容重新生成回复。
+* **🔄 一键重新生成 (Regenerate)**: 对 AI 的回答不满意？点击“重新生成”按钮，立即换一种说法。
+* **🧠 智能上下文管理**: 自动管理最近 20 条对话记录，既保证了多轮对话的连贯性，又防止了 Watch 内存溢出。
+* **🛑 随时中断**: 想要停止生成？点击输入框旁的停止按钮，立刻保存电量和 Token。
 
-### 🌍 全面的模型支持
-内置了主流大模型服务商的预设配置，支持一键切换，开箱即用：
-* **国际主流**:
-    * OpenAI (官方 API)
-    * Google Gemini (原生 API，自动处理 URL 路径)
-    * OpenRouter (聚合服务)
-* **国内精选**:
-    * DeepSeek (深度求索)
-    * 智谱 AI (BigModel / GLM-4)
-    * 阿里云百炼 (通义千问 / Qwen)
-    * 硅基流动 (SiliconFlow)
-    * 魔搭社区 (ModelScope)
+### 🖼️ 多模态与渲染引擎
+* **📷 视觉模型支持 (Vision)**: 从手表相册选图发送，让 GPT-4o 或 Gemini-3-Pro 帮你识图懂图。
+* **📝 强大的 Markdown 渲染**:
+    * **代码高亮**: 清晰展示代码块。
+    * **表格支持**: 专为手表屏幕优化的表格排版 (Vertical Bar + Short Separator)，小屏幕也能看报表。
+    * **图片链接**: 自动渲染 Markdown 中的图片。
+* **➗ 专业级 LaTeX 数学公式**:
+    * 内置自定义解析器，支持 **矩阵**、**向量**、**嵌套分数**、**根号** 等复杂数学符号。
+    * 完美处理物理公式（如 `\hat{i}`, `\vec{F}`）和对齐块。
 
-### 🛠️ 高度可定制化
-* **自定义 Base URL**: 轻松连接自建代理（如 OneAPI、NewAPI）或企业内部的中转服务。
-* **自定义模型 ID**: 不仅仅局限于预设模型！您可以在每个供应商下手动添加任意模型 ID（如 `gpt-4o-2024-05-13` 或微调模型 ID），并为其设置专属备注。
-* **收藏夹管理**: 将常用的模型加入收藏，在首页快速切换，无需反复查找。
+### ⌨️ 输入与交互优化
+* **📱 键盘协同 (Keyboard Sync)**: 优化的输入状态管理，确保使用 iPhone 键盘在手表上打字时不再断连或吞字。
+* **⬇️ 快速回到底部**: 向上翻看历史记录时，右下角会自动浮现“回到底部”按钮，一键回到最新消息。
+* **📳 触觉反馈 (Haptics)**: 发送、成功、报错、停止生成时都有细腻的震动反馈。
+* **🧐 原始/渲染切换**: 点击气泡右下角的 `{}` 图标，瞬间切换渲染视图和原始 Markdown 文本，方便复制或检查源码。
+
+### 🚀 全面的模型支持
+* **预设主流服务商**:
+    * **OpenAI** (官方 API)
+    * **Google Gemini** (原生支持，自动处理路径)
+    * **DeepSeek** (深度求索)
+    * **智谱 AI** (GLM-4)
+    * **阿里云百炼** (通义千问)
+    * **硅基流动** (SiliconFlow)
+    * **魔搭社区** (ModelScope)
+    * **OpenRouter** (聚合平台)
+* **自定义模型**: 可以在任意服务商下手动添加 Model ID (如 `gpt-4o-2024-05-13`)。
+* **自建代理 (BYOL)**: 支持添加自定义 OpenAI 兼容接口，完美对接 OneAPI、NewAPI 或 Ollama 本地服务。
 
 ### 🔒 安全与隐私
-* **BYOK 模式 (Bring Your Own Key)**: 我们不提供公共服务，您需要使用自己的 API Key。
-* **本地存储**: 所有的 API Key 和聊天记录仅存储在您的 Apple Watch 本地（UserDefaults），绝不上传至任何第三方服务器，最大程度保障您的隐私安全。
+* **BYOK 模式**: 仅作为客户端工具，所有 Token 直接发送至服务商。
+* **本地存储**: 聊天记录和 API Key 仅保存在 Apple Watch 本地 (UserDefaults)，绝不上传至任何第三方服务器。
+* **网络安全**: 遵循系统级网络安全策略 (ATS)，保障数据传输安全。
 
-## 🚀 安装与运行
+## 🚀 安装指南
 
-* 由于本项目是一个开源客户端，您需要通过 Xcode 编译安装到您的手表上。
-* Release中提供了ipa安装包可供安装
+### 方式一：直接安装 IPA (推荐)
+前往项目的 **[Releases](https://github.com/Yamada-Ryo4/ChatBot-For-Apple-Watch/releases)** 页面，下载最新的 `.ipa` 文件。
+推荐使用 **TrollStore**、**AltStore** 或 **Sideloadly** 等签名工具安装到您的 Apple Watch 上。
 
-### 环境要求
-* **macOS**: 运行 macOS Sonoma 或更高版本。
-* **Xcode**: 15.0+ (建议使用最新版本)。
-* **watchOS**: 11.5+ (项目使用了 watchOS 10 的最新 SwiftUI API，不支持旧版本，性能占用较大，建议使用s7以上设备)。
-* **Swift**: 5.9+。
+### 方式二：源码编译
+出于隐私和签名配置的考虑，本仓库**未上传** `ChatBot.xcodeproj` 工程文件。如果您希望从源码编译：
 
-### 编译步骤
-1.  **克隆项目**:
-    打开终端，执行以下命令将项目克隆到本地：
+1.  **克隆代码**:
     ```bash
     git clone https://github.com/Yamada-Ryo4/ChatBot-For-Apple-Watch.git
     ```
-2.  **打开项目**:
-    使用 Xcode 打开 `ChatBot.xcodeproj` 文件。
-3.  **配置签名**:
-    * 在左侧导航栏点击项目根节点。
-    * 选择 `TARGETS` -> `ChatBot Watch App`。
-    * 点击 `Signing & Capabilities` 选项卡。
-    * 在 `Team` 下拉菜单中选择您的 Apple ID 开发团队。
-    * 修改 `Bundle Identifier` 为唯一的 ID (例如 `com.yourname.chatbot`) 以避免冲突。
-4.  **运行**:
-    * 将您的 Apple Watch 连接到 Mac（或选择 watchOS 模拟器）。
-    * 点击 Xcode 左上角的运行按钮 (或按 `Cmd + R`)。
+2.  **重建工程**:
+    * 打开 Xcode，创建一个新的 **watchOS App** 项目。
+    * 将 `ChatBot Watch App` 文件夹下的所有 `.swift` 文件拖入您的新工程中。
+    * 确保删除了新工程默认生成的 `ContentView.swift` 和 `App.swift` (使用本项目的 `ChatBotApp.swift` 作为入口)。
+3.  **配置依赖**:
+    * 本项目无第三方 Swift Package 依赖，纯原生构建，拖入即用！
+4.  **配置权限**:
+    * 在 `Info.plist` 中添加 `NSPhotoLibraryUsageDescription` 权限（用于发送图片）。
+    * 配置 `App Transport Security Settings` -> `Allow Arbitrary Loads` 为 `YES` (为了支持各种 HTTP/HTTPS 代理)。
+5.  **编译运行**:
+    * 连接真机或模拟器，开始编译。
 
-## ⚙️ 使用指南
+## ⚙️ 快速上手
 
-### 1. 配置供应商 (Provider)
-App 首次启动时会预设一系列主流供应商。
-1.  在首页向右滑动或点击左上角图标进入 **设置** 页面。
-2.  在 **"供应商配置"** 列表中，选择您想要使用的服务商（例如 `DeepSeek`）。
-3.  **填写 API Key**: 输入您在该服务商平台申请的 API Key（通常以 `sk-` 开头）。
-4.  **验证**: 点击 **"验证 Key 并获取模型"** 按钮。App 会尝试连接服务器并拉取可用模型列表。
-5.  **启用模型**: 验证成功后，下方会出现模型列表。点击您想要使用的模型右侧的星星图标 ⭐，将其加入收藏。
-
-### 2. 添加自定义模型
-如果预设列表中没有您想要使用的特殊模型（例如某个刚发布的预览版模型）：
-1.  进入对应的供应商详情页。
-2.  点击 **"手动添加自定义模型"**。
-3.  **模型 ID**: 输入模型在 API 中的准确 ID (例如 `gemini-1.5-pro-latest`)。
-4.  **备注名称**: 起一个好记的名字 (例如 `Gemini 1.5 Pro`)。
-5.  点击保存，该模型将自动加入收藏列表并在首页可用。
-
-### 3. 连接自建代理 / OneAPI
-如果您使用 OneAPI、NewAPI 或其他中转服务：
-1.  在设置页点击底部的 **"添加自定义供应商"**。
-2.  **名称**: 给您的服务起个名字 (如 `我的 OneAPI`)。
-3.  **接口类型**: 选择 **"OpenAI 兼容"**。
-4.  **Base URL**: 输入您的代理地址 (例如 `https://api.my-domain.com/v1`)。
-5.  **API Key**: 输入您的令牌。
-6.  保存后，按上述步骤验证并添加模型。
-
-## 🏗️ 技术细节
-
-* **UI 框架**: 完全基于 **SwiftUI** 构建，采用了 NavigationStack 和 ScrollViewReader 实现流畅的聊天流。
-* **网络层**: 基于 `URLSession` 和 Swift Concurrency (`async/await`)。
-* **流式处理**: 使用 `AsyncThrowingStream` 手动解析 Server-Sent Events (SSE) 数据流，实现打字机效果。
-* **架构模式**: 遵循 MVVM (Model-View-ViewModel) 设计模式，逻辑与视图分离，易于维护和扩展。
-* **数据持久化**: 使用 `UserDefaults` 配合 `Codable` 协议存储轻量级配置数据。
+1.  **添加 Key**: 打开 App -> 左滑进入 **设置** -> 选择服务商 -> 填入 `API Key`。
+2.  **设置模型**: 点击 **验证** -> 点亮心仪模型右侧的 ⭐ 号。
+3.  **开始对话**: 回到首页，点击 **新对话** (New Chat) 即可畅聊！
 
 ## ⚠️ 免责声明
 
-* 本项目是非官方的开源客户端，与 OpenAI、Google、DeepSeek 等公司无任何关联。
-* 请妥善保管您的 API Key，不要将其泄露给他人。
-* App 自身不提供任何 AI 服务，使用过程中产生的 API 调用费用由您直接向对应的服务商支付。
+* 本项目是非官方开源客户端。
+* 请妥善保管您的 API Key。
+* 使用 AI 服务产生的费用由您向服务商支付。
 
 ## 📄 开源协议
 
-本项目采用 [MIT License](LICENSE) 协议开源。欢迎提交 Issue 和 Pull Request 共同改进！
+MIT License
