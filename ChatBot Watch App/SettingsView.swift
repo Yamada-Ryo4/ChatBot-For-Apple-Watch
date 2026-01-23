@@ -13,16 +13,20 @@ struct SettingsView: View {
                 if viewModel.allFavoriteModels.isEmpty {
                     Text("暂无模型，请进入下方供应商添加").font(.caption).foregroundColor(.gray)
                 } else {
-                    Picker("选择模型", selection: $viewModel.selectedGlobalModelID) {
-                        Text("请选择").tag("")
-                        ForEach(viewModel.allFavoriteModels, id: \.id) { item in
-                            Text(item.displayName).tag(item.id)
+
+                    // 使用自定义 NavigationLink 替代 Picker，实现多级菜单
+                    NavigationLink {
+                        ModelSelectionRootView(viewModel: viewModel)
+                    } label: {
+                        HStack {
+                            Text("选择模型")
+                            Spacer()
+                            Text(viewModel.currentDisplayModelName)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
-                    }
-                    .pickerStyle(.navigationLink)
-                    .onAppear {
-                        let exists = viewModel.allFavoriteModels.contains { $0.id == viewModel.selectedGlobalModelID }
-                        if !exists && !viewModel.selectedGlobalModelID.isEmpty { viewModel.selectedGlobalModelID = "" }
                     }
                 }
             }
@@ -281,5 +285,60 @@ struct AddProviderView: View {
             }.disabled(newConfig.baseURL.isEmpty)
         }
         .navigationTitle("添加")
+    }
+}
+
+// MARK: - 模型选择层级视图
+struct ModelSelectionRootView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    
+    var body: some View {
+        List {
+            ForEach(viewModel.providers) { provider in
+                if !provider.savedModels.isEmpty {
+                    NavigationLink {
+                        ModelListForProviderView(viewModel: viewModel, provider: provider)
+                    } label: {
+                        Label(provider.name, systemImage: provider.icon)
+                    }
+                }
+            }
+        }
+        .navigationTitle("选择供应商")
+    }
+}
+
+struct ModelListForProviderView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let provider: ProviderConfig
+    @Environment(\.dismiss) var dismiss // 用于选中后返回
+    
+    var body: some View {
+        List {
+            ForEach(provider.savedModels) { model in
+                let compositeID = "\(provider.id.uuidString)|\(model.id)"
+                let isSelected = (viewModel.selectedGlobalModelID == compositeID)
+                
+                Button(action: {
+                    viewModel.selectedGlobalModelID = compositeID
+                    dismiss() // 选中后返回上一级（或连续返回，但这里先返回一级）
+                }) {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(model.displayName ?? model.id)
+                                .foregroundColor(isSelected ? .blue : .primary)
+                            if let display = model.displayName {
+                                Text(model.id).font(.caption2).foregroundColor(.gray)
+                            }
+                        }
+                        Spacer()
+                        if isSelected {
+                            Image(systemName: "checkmark").foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(provider.name)
     }
 }

@@ -1,0 +1,97 @@
+import Foundation
+import CoreLocation
+import Combine
+
+class LocationService: NSObject, ObservableObject, CLLocationManagerDelegate {
+    static let shared = LocationService()
+    
+    @Published var locationInfo: String? = nil
+    
+    private let locationManager = CLLocationManager()
+    private var isUpdating = false
+    
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyHundredMeters // 降低精度以省电
+    }
+    
+    func requestPermission() {
+        locationManager.requestWhenInUseAuthorization()
+    }
+    
+    func updateLocation() {
+        guard !isUpdating else { return }
+        isUpdating = true
+        
+        // 1. 尝试 GPS 定位
+        if locationManager.authorizationStatus == .authorizedWhenInUse || locationManager.authorizationStatus == .authorizedAlways {
+            locationManager.requestLocation()
+        } else {
+            // 如果没权限，直接使用 IP 定位
+            fetchIPLocation()
+        }
+    }
+    
+    // MARK: - CLLocationManagerDelegate
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        // 获取到 GPS 坐标，进行反地理编码
+        let geocoder = CLGeocoder()
+        geocoder.reverseGeocodeLocation(location) { [weak self] placemarks, error in
+            guard let self = self else { return }
+            if let p = placemarks?.first {
+                let city = p.locality ?? p.administrativeArea ?? ""
+                let district = p.subLocality ?? ""
+                let country = p.country ?? ""
+                let address = "\(country) \(city) \(district)".trimmingCharacters(in: .whitespaces)
+                
+                DispatchQueue.main.async {
+                    self.locationInfo = "Location: \(address) (Source: GPS)"
+                    self.isUpdating = false
+                }
+            } else {
+                // 反编码失败，回退到 IP
+                self.fetchIPLocation()
+            }
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("GPS Failed: \(error), falling back to IP")
+        fetchIPLocation()
+    }
+    
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus == .authorizedWhenInUse {
+            manager.requestLocation()
+        }
+    }
+    
+    // MARK: - IP Location
+    private func fetchIPLocation() {
+        guard let url = URL(string: "http://ip-api.com/json/?fields=country,city,offset") else { return }
+        
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self, let data = data, error == nil else {
+                DispatchQueue.main.async { self?.isUpdating = false }
+                return
+            }
+            
+            // 简单的 JSON 解析结构
+            struct IPInfo: Decodable {
+                let country: String
+                let city: String
+            }
+            
+            if let ipInfo = try? JSONDecoder().decode(IPInfo.self, from: data) {
+                DispatchQueue.main.async {
+                    // 如果 GPS 已经成功了，就不覆盖
+                    if self.locationInfo?.contains("GPS") == true { return }
+                    self.locationInfo = "Location: \(ipInfo.country) \(ipInfo.city) (Source: IP)"
+                    self.isUpdating = false
+                }
+            }
+        }.resume()
+    }
+}

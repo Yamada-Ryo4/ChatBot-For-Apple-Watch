@@ -3,7 +3,7 @@ import PhotosUI
 
 struct ChatView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject var viewModel = ChatViewModel()
+    @EnvironmentObject var viewModel: ChatViewModel // 改为 EnvironmentObject
     @Namespace private var bottomID
     @State private var showHistory = false
     @State private var isAtBottom = true
@@ -434,12 +434,37 @@ struct PrettyMessageBubble: View {
 struct HistoryListView: View {
     @ObservedObject var viewModel: ChatViewModel
     @Binding var isPresented: Bool
+    
+    @State private var showDeleteConfirmation = false
+    @State private var indexSetToDelete: IndexSet?
+    
     var body: some View {
         List {
             Button("新建对话") { viewModel.createNewSession(); isPresented = false }
+                .foregroundColor(.blue)
+            
             ForEach(viewModel.sessions) { session in
                 Button(session.title) { viewModel.selectSession(session); isPresented = false }
             }
+            .onDelete { indices in
+                indexSetToDelete = indices
+                showDeleteConfirmation = true
+            }
+        }
+        .alert(isPresented: $showDeleteConfirmation) {
+            Alert(
+                title: Text("删除对话"),
+                message: Text("确定要删除选中的对话吗？此操作无法撤销。"),
+                primaryButton: .destructive(Text("删除")) {
+                    if let indices = indexSetToDelete {
+                        viewModel.deleteSession(at: indices)
+                    }
+                    indexSetToDelete = nil
+                },
+                secondaryButton: .cancel(Text("取消")) {
+                    indexSetToDelete = nil
+                }
+            )
         }
     }
 }

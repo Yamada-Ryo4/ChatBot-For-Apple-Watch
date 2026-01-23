@@ -2,7 +2,7 @@ import SwiftUI
 import PhotosUI
 import Combine
 import WatchKit
-
+import ClockKit
 @MainActor
 class ChatViewModel: ObservableObject {
     @AppStorage("savedProviders_v3") var savedProvidersData: Data = Data()
@@ -73,6 +73,28 @@ class ChatViewModel: ObservableObject {
         }
         if sessions.isEmpty { createNewSession() }
         else if currentSessionId == nil { currentSessionId = sessions.first?.id }
+        
+        // 监听云端数据变更
+        NotificationCenter.default.addObserver(forName: .init("CloudDataDidUpdate"), object: nil, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in self.loadFromCloud() }
+        }
+
+        // 启动定位以备用
+        LocationService.shared.requestPermission()
+        LocationService.shared.updateLocation()
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    // 从云端/本地重新加载配置
+    func loadFromCloud() {
+        if let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
+            self.providers = decoded
+            print("☁️ [ViewModel] UI refreshed from Cloud Data")
+        }
     }
     
     // MARK: - 会话管理
@@ -89,7 +111,19 @@ class ChatViewModel: ObservableObject {
         if let current = currentSessionId, idsToDelete.contains(current) { if let first = sessions.first { currentSessionId = first.id } else { createNewSession() } }
         saveSessions()
     }
-    private func saveSessions() { if let encoded = try? JSONEncoder().encode(sessions) { UserDefaults.standard.set(encoded, forKey: "chatSessions_v1") } }
+    private func saveSessions() {
+        if let encoded = try? JSONEncoder().encode(sessions) {
+            UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
+            
+            // 刷新表盘组件
+            DispatchQueue.main.async {
+                let server = CLKComplicationServer.sharedInstance()
+                for complication in server.activeComplications ?? [] {
+                    server.reloadTimeline(for: complication)
+                }
+            }
+        }
+    }
     
     var currentMessages: [ChatMessage] {
         guard let sessionId = currentSessionId, let session = sessions.first(where: { $0.id == sessionId }) else { return [] }
@@ -112,7 +146,13 @@ class ChatViewModel: ObservableObject {
     }
     
     // MARK: - 供应商与模型逻辑
-    func saveProviders() { if let encoded = try? JSONEncoder().encode(providers) { savedProvidersData = encoded } }
+    func saveProviders() {
+        if let encoded = try? JSONEncoder().encode(providers) {
+            savedProvidersData = encoded
+            // 触发云端同步
+            SyncService.shared.upload()
+        }
+    }
     
     func fetchModelsForProvider(providerID: UUID) async {
         guard let index = providers.firstIndex(where: { $0.id == providerID }) else { return }
@@ -216,7 +256,8 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = msgs.dropLast(1).suffix(10).map { $0 }
+            let history = buildHistoryWithContext(from: msgs)
+
             var responseText = ""
             var thinkingText = ""
             do {
@@ -289,6 +330,24 @@ class ChatViewModel: ObservableObject {
     }
     
     /// 解析 <think>...</think> 标签，返回 (思考内容, 剩余内容)
+    private func buildHistoryWithContext(from msgs: [ChatMessage]) -> [ChatMessage] {
+        var history = msgs.dropLast(1).suffix(10).map { $0 }
+        
+        // 构造最简单的 System Context
+        let currentTime = Date().formatted(date: .numeric, time: .standard)
+        var contextInfo = "Current Time: \(currentTime)"
+        if let location = LocationService.shared.locationInfo {
+             let cleanLoc = location.replacingOccurrences(of: "Location: ", with: "")
+             contextInfo += "; Location: \(cleanLoc)"
+        }
+        
+        // 纯数据注入，不带额外指令
+        let systemMsg = ChatMessage(role: .system, text: contextInfo)
+        history.insert(systemMsg, at: 0)
+        
+        return history
+    }
+
     private func parseThinkTags(_ text: String) -> (thinking: String?, content: String) {
         var thinking = ""
         var content = text
@@ -352,7 +411,7 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = msgs.dropLast(1).suffix(10).map { $0 }
+            let history = buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
             do {
@@ -461,7 +520,7 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = msgs.dropLast(1).suffix(10).map { $0 }
+            let history = buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
             do {
