@@ -79,10 +79,10 @@
 不再受限于单一厂商，把全世界的 AI 模型装进手表。
 
 - **🌍 预设主流厂商**
-  - **OpenAI** (GPT-5.2, GPT-4o)
-  - **Google Gemini** (Gemini-3-Pro)
+  - **OpenAI** (GPT-3.5, GPT-4, GPT-4o)
+  - **Google Gemini** (Gemini-Pro, Flash, 1.5)
   - **DeepSeek** (深度求索 V3/R1)
-  - **Zhipu AI** (智谱 GLM-4.6)
+  - **Zhipu AI** (智谱 GLM-4)
   - **Aliyun Qwen** (通义千问)
   - **SiliconFlow** (硅基流动 - 聚合 DeepSeek/Qwen 等开源模型)
   - **ModelScope** (魔搭社区)
@@ -137,10 +137,10 @@
 
 ### 1. 配置服务
 
-1. 打开 App，在首页点击左上角进入 **Settings** (设置)。
+1. 打开 App，在首页左滑进入 **Settings** (设置)。
 2. 点击 **Model Provider**，选择您的服务商 (如 OpenAI 或 DeepSeek)。
 3. 输入您的 `API Key` (从各官网获取)。
-4. 点击 **Verify** 验证连通性。
+4. *(可选)* 点击 **Verify** 验证连通性。
 
 ### 2. 选择模型
 
@@ -152,7 +152,7 @@
 
 1. 回到首页，点击 **New Chat**。
 2. 支持语音转文字、手写或键盘输入。
-3. 点击左下角相册图标可发送图片。
+3. 点击右下角相册图标可发送图片。
 
 ### 4. 管理对话
 
