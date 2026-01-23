@@ -14,15 +14,11 @@ struct Provider: TimelineProvider {
         var message = "No messages"
         var title = "ChatBot"
         
-        // 尝试从 AppGroup 或 UserDefaults 读取
-        // 注意：如果不配置 App Groups，这里读不到主 App 的新数据，只能读到默认值
-        if let data = UserDefaults.standard.data(forKey: "chatSessions_v1"),
-           let sessions = try? JSONDecoder().decode([ChatSession].self, from: data),
-           let first = sessions.first {
-            title = first.title
-            if let lastMsg = first.messages.last(where: { $0.role != .system }) {
-                message = lastMsg.text
-            }
+        // 尝试从 AppGroup 或 UserDefaults 读取轻量级数据
+        // 使用 "widget_tiny_data" 避免加载整个聊天历史导致 OOM
+        if let data = UserDefaults.standard.dictionary(forKey: "widget_tiny_data") as? [String: String] {
+            if let t = data["title"] { title = t }
+            if let m = data["lastMessage"] { message = m }
         }
         
         let entry = SimpleEntry(date: Date(), lastMessage: message, title: title)
@@ -35,18 +31,6 @@ struct SimpleEntry: TimelineEntry {
     let date: Date
     let lastMessage: String
     let title: String
-}
-struct ChatSession: Codable {
-    var id: UUID
-    var title: String
-    var messages: [ChatMessage]
-    var lastModified: Date
-}
-struct ChatMessage: Codable {
-    enum Role: String, Codable { case user, assistant, system }
-    var id: UUID
-    var role: Role
-    var text: String
 }
 // MARK: - Widget View (UI)
 struct ChatBotWidgetEntryView : View {

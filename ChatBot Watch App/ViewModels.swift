@@ -115,6 +115,22 @@ class ChatViewModel: ObservableObject {
         if let encoded = try? JSONEncoder().encode(sessions) {
             UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
             
+            // 写入轻量级数据供 Widget 使用，防止 OOM
+            if let first = sessions.first {
+                var msg = "No messages"
+                if let lastM = first.messages.last(where: { $0.role != .system }) {
+                    msg = lastM.text
+                }
+                let widgetData: [String: String] = ["title": first.title, "lastMessage": msg]
+                UserDefaults.standard.set(widgetData, forKey: "widget_tiny_data")
+            } else {
+                 UserDefaults.standard.set(["title": "ChatBot", "lastMessage": "No conversations"], forKey: "widget_tiny_data")
+            }
+            // 确保 WidgetKit 刷新数据 (如果没有 App Group，这步其实无法跨进程刷新，这里主要为了逻辑完整性)
+             #if canImport(WidgetKit)
+             // WidgetCenter.shared.reloadAllTimelines() // 主 App 无法直接调用 WidgetCenter 刷新，除非配置了正确的目标
+             #endif
+
             // 刷新表盘组件
             DispatchQueue.main.async {
                 let server = CLKComplicationServer.sharedInstance()
