@@ -3,12 +3,19 @@ import PhotosUI
 import Combine
 import WatchKit
 import ClockKit
+import ImageIO
 @MainActor
 class ChatViewModel: ObservableObject {
     @AppStorage("savedProviders_v3") var savedProvidersData: Data = Data()
     @AppStorage("selectedGlobalModelID") var selectedGlobalModelID: String = ""
     @AppStorage("showModelNameInNavBar") var showModelNameInNavBar: Bool = true  // 显示顶部模型名称
     @AppStorage("showScrollToBottomButton") var showScrollToBottomButton: Bool = true  // 显示回到底部按钮
+    @AppStorage("enableHapticFeedback") var enableHapticFeedback: Bool = true  // 启用振动反馈
+    @AppStorage("historyMessageCount") var historyMessageCount: Int = 10  // 携带的对话历史数量
+    @AppStorage("customSystemPrompt") var customSystemPrompt: String = ""  // 自定义系统提示词
+    @AppStorage("temperature") var temperature: Double = 0.7  // 温度参数 (0.0-2.0)
+    @AppStorage("latexRenderingEnabled") var latexRenderingEnabled: Bool = true  // 启用 LaTeX 数学格式渲染
+    @AppStorage("advancedLatexEnabled") var advancedLatexEnabled: Bool = false  // 高级渲染模式（可能导致排版问题）
     @Published var providers: [ProviderConfig] = []
     @Published var sessions: [ChatSession] = []
     @Published var currentSessionId: UUID?
@@ -27,8 +34,8 @@ class ChatViewModel: ObservableObject {
         isLoading = false
     }
     init() {
-        // 使用 v11 强制刷新预设，内置默认免费模型
-        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v13")
+        // 使用 v15 强制刷新预设，内置用户配置的 Key
+        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v15")
         if hasLoaded, let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
             self.providers = decoded
         } else {
@@ -42,24 +49,25 @@ class ChatViewModel: ObservableObject {
                 icon: "sparkles",
                 apiType: .openAI,
                 savedModels: [zhipuDefaultModel],
-                isValidated: true
+                isValidated: false
             )
             
             self.providers = [
                 zhipuProvider,
-                ProviderConfig(name: "OpenAI (官方)", baseURL: "https://api.openai.com/v1", apiKey: "", isPreset: true, icon: "globe"),
+                ProviderConfig(name: "OpenAI", baseURL: "https://api.openai.com/v1", apiKey: "", isPreset: true, icon: "globe"),
                 ProviderConfig(name: "DeepSeek", baseURL: "https://api.deepseek.com", apiKey: "", isPreset: true, icon: "brain"),
                 ProviderConfig(name: "硅基流动", baseURL: "https://api.siliconflow.cn/v1", apiKey: "", isPreset: true, icon: "cpu"),
                 ProviderConfig(name: "阿里云百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", isPreset: true, icon: "cloud"),
                 ProviderConfig(name: "ModelScope", baseURL: "https://api-inference.modelscope.cn/v1", apiKey: "", isPreset: true, icon: "cube"),
                 ProviderConfig(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKey: "", isPreset: true, icon: "network"),
-                ProviderConfig(name: "Gemini", baseURL: "https://gemini.yamadaryo.me", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini)
+                ProviderConfig(name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini),
+                ProviderConfig(name: "GeminCLI", baseURL: "https://api.yamadaryo.me/v1", apiKey: "", isPreset: true, icon: "command", apiType: .openAI)
             ]
             
             // 自动选择智谱AI的默认模型
             selectedGlobalModelID = "\(zhipuProvider.id.uuidString)|\(zhipuDefaultModel.id)"
             
-            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v13")
+            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v15")
             saveProviders()
         }
         if let data = UserDefaults.standard.data(forKey: "chatSessions_v1") {
@@ -157,7 +165,14 @@ class ChatViewModel: ObservableObject {
         guard let index = sessions.firstIndex(where: { $0.id == currentSessionId }) else { return }
         sessions[index].messages = newMessages
         sessions[index].lastModified = Date()
-        if newMessages.count == 1, let firstText = newMessages.first?.text, !firstText.isEmpty { sessions[index].title = String(firstText.prefix(10)) }
+        
+        // 改进标题生成：使用用户首条消息的前 15 字符
+        if sessions[index].title == "新对话" || sessions[index].title.isEmpty {
+            if let firstUserMsg = newMessages.first(where: { $0.role == .user }), !firstUserMsg.text.isEmpty {
+                let cleanText = firstUserMsg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                sessions[index].title = String(cleanText.prefix(15)) + (cleanText.count > 15 ? "..." : "")
+            }
+        }
         sessions.sort(by: { $0.lastModified > $1.lastModified })
     }
     
@@ -248,6 +263,7 @@ class ChatViewModel: ObservableObject {
         return result
     }
     
+
     func sendMessage() {
         guard (!inputText.isEmpty || selectedImageData != nil) else { return }
         let components = selectedGlobalModelID.split(separator: "|")
@@ -266,7 +282,7 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
         
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
-        WKInterfaceDevice.current().play(.click) // 开始生成震动
+        if enableHapticFeedback { WKInterfaceDevice.current().play(.click) } // 开始生成震动
         msgs.append(ChatMessage(role: .assistant, text: ""))
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
@@ -277,7 +293,7 @@ class ChatViewModel: ObservableObject {
             var responseText = ""
             var thinkingText = ""
             do {
-                let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
+                let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     // 检查是否被取消
                     if Task.isCancelled { break }
@@ -318,7 +334,7 @@ class ChatViewModel: ObservableObject {
                 // 流式输出完成后，一次性保存到磁盘
                 saveSessions()
                 // 生成完成：成功震动
-                WKInterfaceDevice.current().play(.success)
+                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
             } catch {
                 // 如果是取消错误，标记为用户停止
                 if Task.isCancelled {
@@ -330,14 +346,14 @@ class ChatViewModel: ObservableObject {
                     }
                     saveSessions() // 停止后保存
                     // 停止震动 (使用 click 或 directionDown)
-                    WKInterfaceDevice.current().play(.directionDown)
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
                     else { currentMsgs[botIndex].text += "\n[中断]" }
                     updateCurrentSessionMessagesInMemory(currentMsgs)
                     saveSessions() // 错误后保存
                     // 错误震动
-                    WKInterfaceDevice.current().play(.failure)
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
                 }
             }
             isLoading = false
@@ -347,18 +363,27 @@ class ChatViewModel: ObservableObject {
     
     /// 解析 <think>...</think> 标签，返回 (思考内容, 剩余内容)
     private func buildHistoryWithContext(from msgs: [ChatMessage]) -> [ChatMessage] {
-        var history = msgs.dropLast(1).suffix(10).map { $0 }
+        var history = msgs.dropLast(1).suffix(historyMessageCount).map { $0 }
         
-        // 构造最简单的 System Context
+        // 构造系统上下文
+        var systemParts: [String] = []
+        
+        // 1. 用户自定义提示词（优先级最高）
+        if !customSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            systemParts.append(customSystemPrompt)
+        }
+        
+        // 2. 时间和位置信息
         let currentTime = Date().formatted(date: .numeric, time: .standard)
         var contextInfo = "Current Time: \(currentTime)"
         if let location = LocationService.shared.locationInfo {
              let cleanLoc = location.replacingOccurrences(of: "Location: ", with: "")
              contextInfo += "; Location: \(cleanLoc)"
         }
+        systemParts.append(contextInfo)
         
-        // 纯数据注入，不带额外指令
-        let systemMsg = ChatMessage(role: .system, text: contextInfo)
+        // 合并系统消息
+        let systemMsg = ChatMessage(role: .system, text: systemParts.joined(separator: "\n\n"))
         history.insert(systemMsg, at: 0)
         
         return history
@@ -431,7 +456,7 @@ class ChatViewModel: ObservableObject {
             var responseText = ""
             var thinkingText = ""
             do {
-                let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
+                let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     if Task.isCancelled { break }
                     
@@ -481,10 +506,15 @@ class ChatViewModel: ObservableObject {
     
     func loadImage() {
         Task {
-            if let data = try? await selectedImageItem?.loadTransferable(type: Data.self),
-               let uiImage = UIImage(data: data) {
-                // 仅做 JPEG 压缩，保持原始尺寸（保留小文字清晰度）
-                self.selectedImageData = uiImage.jpegData(compressionQuality: 0.5)
+            if let data = try? await selectedImageItem?.loadTransferable(type: Data.self) {
+                // 使用 ImageIO 直接从 Data 下采样，避免解码全图导致 Watch 内存溢出 (OOM)
+                // 提升分辨率至 1200px 以确保试卷/文档清晰可读
+                if let downsampled = data.downsampled(to: 1200) {
+                     // 0.6 质量通常在体积和清晰度之间有很好的平衡
+                     self.selectedImageData = downsampled.jpegData(compressionQuality: 0.6)
+                } else {
+                     self.selectedImageData = data
+                }
             }
         }
     }
@@ -540,7 +570,7 @@ class ChatViewModel: ObservableObject {
             var responseText = ""
             var thinkingText = ""
             do {
-                let stream = service.streamChat(messages: history, modelId: modelID, config: provider)
+                let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     if Task.isCancelled { break }
                     
@@ -586,5 +616,23 @@ class ChatViewModel: ObservableObject {
             isLoading = false
             currentTask = nil
         }
+    }
+}
+
+extension Data {
+    /// 使用 ImageIO 进行高效下采样，避免内存峰值
+    func downsampled(to maxDimension: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(self as CFData, options) else { return nil }
+        
+        let downsampleOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension
+        ] as CFDictionary
+        
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }

@@ -397,11 +397,11 @@ struct PrettyMessageBubble: View {
                                 .frame(maxWidth: 150)
                                 
                                 if !textWithoutImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    MarkdownView(text: textWithoutImage)
+                                    MixedContentView(text: textWithoutImage)
                                 }
                             } else {
-                                // 使用完整 Markdown 渲染器
-                                MarkdownView(text: cleanedText)
+                                // 使用完整 Markdown 渲染器 (支持公式)
+                                MixedContentView(text: cleanedText)
                             }
                         }
                         
@@ -508,5 +508,625 @@ struct ThinkingContentView: View {
         .padding(8)
         .background(Color.purple.opacity(0.05))
         .cornerRadius(10)
+    }
+}
+
+// MARK: - FlowLayout
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 0
+    var lineSpacing: CGFloat = 4
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrangeSubviews(proposal: proposal, subviews: subviews)
+        if rows.isEmpty { return .zero }
+        
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        
+        for row in rows {
+            width = max(width, row.width)
+            height += row.height + lineSpacing
+        }
+        height -= lineSpacing
+        
+        return CGSize(width: width, height: height)
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = arrangeSubviews(proposal: proposal, subviews: subviews)
+        
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            // 每一行内的元素垂直居中对齐
+            let centerY = y + row.height / 2
+            
+            for item in row.items {
+                let size = item.size
+                // 计算垂直居中的 Y 坐标
+                let itemY = centerY - size.height / 2
+                item.view.place(at: CGPoint(x: x, y: itemY), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+    
+    struct Row {
+        var items: [Item] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+    
+    struct Item {
+        var view: LayoutSubview
+        var size: CGSize
+    }
+    
+    private func arrangeSubviews(proposal: ProposedViewSize, subviews: Subviews) -> [Row] {
+        // 修改：防止在 Watch 上出现无限宽度导致不换行
+        // 获取屏幕宽度，减去两边的 padding (大约 30-40) 以确保安全换行
+        // Bubble padding (20) + View padding (16) = 36. Use 40 for safety.
+        let screenWidth = WKInterfaceDevice.current().screenBounds.width
+        let safeWidth = screenWidth - 40
+        
+        // 强制限制最大宽度，无论父视图提议多大
+        // 如果 proposal.width 为 nil (unspecified) 或 infinity，则使用 safeWidth
+        // 如果 proposal.width 是具体值，取 min(proposal, safeWidth)
+        let proposed = proposal.width ?? .infinity
+        let maxWidth = proposed == .infinity ? safeWidth : min(proposed, safeWidth)
+        
+        var rows: [Row] = []
+        var currentRow = Row()
+        
+        for subview in subviews {
+            // 关键修改：告诉子视图不要超过 maxWidth
+            // 这样 Text 如果很长（例如长单词或未切分的句子），会自动换行而不是撑大宽度
+            let size = subview.sizeThatFits(ProposedViewSize(width: maxWidth, height: nil))
+            
+            if currentRow.width + size.width + spacing > maxWidth && !currentRow.items.isEmpty {
+                 rows.append(currentRow)
+                 currentRow = Row()
+            }
+            
+            currentRow.items.append(Item(view: subview, size: size))
+            currentRow.width += size.width + (currentRow.items.count > 1 ? spacing : 0)
+            currentRow.height = max(currentRow.height, size.height)
+        }
+        
+        if !currentRow.items.isEmpty {
+            rows.append(currentRow)
+        }
+        
+        return rows
+    }
+}
+
+// MARK: - 数学文本组件
+// 智能数学文本组件：自动处理变量斜体、函数正体
+struct MathText: View {
+    let text: String
+    let size: CGFloat
+    
+    // 已知数学函数 (需要保持正体)
+    private let mathFunctions: Set<String> = [
+        "sin", "cos", "tan", "cot", "sec", "csc",
+        "arcsin", "arccos", "arctan",
+        "sinh", "cosh", "tanh",
+        "log", "ln", "lg", "lim", "exp",
+        "min", "max", "sup", "inf", "det", "dim"
+    ]
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(splitMathParts(text), id: \.self) { part in
+                if isNumber(part) || mathFunctions.contains(part) || isSymbol(part) {
+                    Text(part)
+                        .font(.system(size: size, weight: .regular, design: .serif))
+                } else {
+                    Text(part)
+                        .font(.system(size: size, weight: .regular, design: .serif))
+                        .italic()
+                }
+            }
+        }
+    }
+    
+    func splitMathParts(_ str: String) -> [String] {
+        var result: [String] = []
+        var currentBuffer = ""
+        
+        for char in str {
+            if char.isNumber {
+                if !currentBuffer.isEmpty && !currentBuffer.last!.isNumber {
+                    result.append(currentBuffer); currentBuffer = ""
+                }
+                currentBuffer.append(char)
+            } else if char.isLetter {
+                if !currentBuffer.isEmpty && !currentBuffer.last!.isLetter {
+                    result.append(currentBuffer); currentBuffer = ""
+                }
+                currentBuffer.append(char)
+            } else {
+                if !currentBuffer.isEmpty {
+                    result.append(currentBuffer); currentBuffer = ""
+                }
+                result.append(String(char))
+            }
+        }
+        if !currentBuffer.isEmpty { result.append(currentBuffer) }
+        return result
+    }
+    
+    func isNumber(_ str: String) -> Bool { Double(str) != nil }
+    func isSymbol(_ str: String) -> Bool { !str.first!.isLetter && !str.first!.isNumber }
+}
+
+// MARK: - 消息内容视图 (根据设置选择渲染方式)
+struct MessageContentView: View {
+    let text: String
+    @EnvironmentObject var viewModel: ChatViewModel
+    
+    var body: some View {
+        // Markdown 格式化始终应用
+        let markdownProcessed = MarkdownParser.cleanMarkdown(text)
+        
+        if !viewModel.latexRenderingEnabled {
+            // 关闭 LaTeX 渲染：只应用 Markdown 格式化，不转换数学符号
+            Text(markdownProcessed)
+                .font(.system(size: 14))
+                .fixedSize(horizontal: false, vertical: true)
+        } else if viewModel.advancedLatexEnabled {
+            // 高级模式：使用 FlowLayout + AST 解析
+            AdvancedLatexView(text: markdownProcessed)
+        } else {
+            // 简单模式：Markdown + LaTeX 符号替换
+            Text(SimpleLatexConverter.convertLatexOnly(markdownProcessed))
+                .font(.system(size: 14))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// 高级 LaTeX 渲染视图 (使用 FlowLayout)
+struct AdvancedLatexView: View {
+    let text: String
+    
+    var body: some View {
+        let nodes = LaTeXParser.parseToNodes(text)
+        
+        FlowLayout(spacing: 0, lineSpacing: 6) {
+            ForEach(nodes) { node in
+                LatexNodeView(node: node)
+            }
+        }
+    }
+}
+
+// MARK: - LaTeX 符号转换器 (简单模式)
+struct SimpleLatexConverter {
+    
+    // 静态常量：希腊字母映射
+    private static let greekLetters: [String: String] = [
+        "\\alpha": "α", "\\beta": "β", "\\gamma": "γ", "\\delta": "δ",
+        "\\epsilon": "ε", "\\zeta": "ζ", "\\eta": "η", "\\theta": "θ",
+        "\\iota": "ι", "\\kappa": "κ", "\\lambda": "λ", "\\mu": "μ",
+        "\\nu": "ν", "\\xi": "ξ", "\\pi": "π", "\\rho": "ρ",
+        "\\sigma": "σ", "\\tau": "τ", "\\upsilon": "υ", "\\phi": "φ",
+        "\\chi": "χ", "\\psi": "ψ", "\\omega": "ω",
+        "\\Gamma": "Γ", "\\Delta": "Δ", "\\Theta": "Θ", "\\Lambda": "Λ",
+        "\\Xi": "Ξ", "\\Pi": "Π", "\\Sigma": "Σ", "\\Phi": "Φ",
+        "\\Psi": "Ψ", "\\Omega": "Ω"
+    ]
+    
+    // 静态常量：数学运算符映射
+    private static let mathSymbols: [String: String] = [
+        "\\times": "×", "\\div": "÷", "\\pm": "±", "\\mp": "∓",
+        "\\cdot": "·", "\\leq": "≤", "\\le": "≤", "\\geq": "≥", "\\ge": "≥",
+        "\\neq": "≠", "\\ne": "≠", "\\approx": "≈", "\\equiv": "≡",
+        "\\infty": "∞", "\\propto": "∝",
+        "\\sum": "Σ", "\\prod": "Π", "\\int": "∫", "\\oint": "∮",
+        "\\partial": "∂", "\\nabla": "∇", "\\forall": "∀", "\\exists": "∃",
+        "\\in": "∈", "\\notin": "∉", "\\subset": "⊂", "\\supset": "⊃",
+        "\\subseteq": "⊆", "\\supseteq": "⊇", "\\cup": "∪", "\\cap": "∩",
+        "\\emptyset": "∅", "\\varnothing": "∅",
+        "\\rightarrow": "→", "\\to": "→", "\\Rightarrow": "⇒", "\\implies": "⟹",
+        "\\leftarrow": "←", "\\Leftarrow": "⇐",
+        "\\leftrightarrow": "↔", "\\Leftrightarrow": "⇔", "\\iff": "⟺",
+        "\\because": "∵", "\\therefore": "∴",
+        "\\angle": "∠", "\\perp": "⊥", "\\parallel": "∥",
+        "\\triangle": "△", "\\circ": "°", "\\sqrt": "√"
+    ]
+    
+    // 静态常量：上标映射
+    private static let superscripts: [String: String] = [
+        "^{0}": "⁰", "^{1}": "¹", "^{2}": "²", "^{3}": "³", "^{n}": "ⁿ",
+        "^0": "⁰", "^1": "¹", "^2": "²", "^3": "³", "^n": "ⁿ", "^m": "ᵐ"
+    ]
+    
+    // 静态常量：下标映射
+    private static let subscripts: [String: String] = [
+        "_{0}": "₀", "_{1}": "₁", "_{2}": "₂", "_{n}": "ₙ", "_{m}": "ₘ", "_{i}": "ᵢ",
+        "_0": "₀", "_1": "₁", "_2": "₂", "_n": "ₙ", "_m": "ₘ", "_i": "ᵢ", "_a": "ₐ", "_b": "ᵦ"
+    ]
+    
+    // 缓存的正则表达式
+    private static let fracRegex = try? NSRegularExpression(pattern: "\\\\frac\\{([^}]*)\\}\\{([^}]*)\\}")
+    private static let barRegex = try? NSRegularExpression(pattern: "\\\\bar\\{([^}]*)\\}")
+    private static let vecRegex = try? NSRegularExpression(pattern: "\\\\vec\\{([^}]*)\\}")
+    private static let binomRegex = try? NSRegularExpression(pattern: "\\\\binom\\{([^}]*)\\}\\{([^}]*)\\}")
+    private static let commandRegex = try? NSRegularExpression(pattern: "\\\\([a-zA-Z]+)")
+    
+    /// 转换 LaTeX 数学符号（不处理 Markdown）
+    static func convertLatexOnly(_ text: String) -> String {
+        var result = text
+        
+        // 1. 移除数学模式标记 (单个和双个 $)
+        result = result.replacingOccurrences(of: "$$", with: "")
+        result = result.replacingOccurrences(of: "$", with: "")
+        
+        // 2. 预处理：先把 \text{内容} 替换为 [内容]，避免花括号干扰
+        let textPattern = "\\\\text\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: textPattern) {
+            for _ in 0..<5 {
+                let newResult = regex.stringByReplacingMatches(
+                    in: result, range: NSRange(result.startIndex..., in: result),
+                    withTemplate: "[$1]"
+                )
+                if newResult == result { break }
+                result = newResult
+            }
+        }
+        
+        // 3. 处理 \sqrt{} -> √()
+        let sqrtPattern = "\\\\sqrt\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: sqrtPattern) {
+            for _ in 0..<5 {
+                let newResult = regex.stringByReplacingMatches(
+                    in: result, range: NSRange(result.startIndex..., in: result),
+                    withTemplate: "√($1)"
+                )
+                if newResult == result { break }
+                result = newResult
+            }
+        }
+        
+        // 4. 处理分数 \frac{a}{b} -> (a)/(b)
+        // 迭代处理以应对嵌套
+        let fracPattern = "\\\\frac\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: fracPattern) {
+            for _ in 0..<10 {
+                let newResult = regex.stringByReplacingMatches(
+                    in: result, range: NSRange(result.startIndex..., in: result),
+                    withTemplate: "($1)/($2)"
+                )
+                if newResult == result { break }
+                result = newResult
+            }
+        }
+        
+        // 5. 上划线: \bar{x} -> x̄
+        let barPattern = "\\\\bar\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: barPattern) {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1̄"
+            )
+        }
+        
+        // 6. 向量: \vec{x} -> x⃗
+        let vecPattern = "\\\\vec\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: vecPattern) {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1⃗"
+            )
+        }
+        
+        // 7. 组合数: \binom{n}{k} -> C(n,k)
+        let binomPattern = "\\\\binom\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: binomPattern) {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "C($1,$2)"
+            )
+        }
+        
+        // 8. 希腊字母
+        for (latex, symbol) in greekLetters {
+            result = result.replacingOccurrences(of: latex, with: symbol)
+        }
+        
+        // 9. 数学运算符
+        for (latex, symbol) in mathSymbols {
+            result = result.replacingOccurrences(of: latex, with: symbol)
+        }
+        
+        // 10. 上下标
+        for (latex, symbol) in superscripts {
+            result = result.replacingOccurrences(of: latex, with: symbol)
+        }
+        for (latex, symbol) in subscripts {
+            result = result.replacingOccurrences(of: latex, with: symbol)
+        }
+        
+        // 11. 移除剩余的 LaTeX 命令 (保留命令名)
+        if let regex = commandRegex {
+            result = regex.stringByReplacingMatches(
+                in: result, range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1"
+            )
+        }
+        
+        // 12. 清理花括号
+        result = result.replacingOccurrences(of: "{", with: "")
+        result = result.replacingOccurrences(of: "}", with: "")
+        
+        // 13. 恢复 \text 的方括号为普通文本
+        result = result.replacingOccurrences(of: "[", with: "")
+        result = result.replacingOccurrences(of: "]", with: "")
+        
+        return result
+    }
+}
+
+// 智能分词：处理中英文混排
+private func smartTokenize(_ str: String) -> [String] {
+    var tokens: [String] = []
+    var currentToken = ""
+    
+    for char in str {
+        if char == " " {
+            if !currentToken.isEmpty {
+                tokens.append(currentToken)
+                currentToken = ""
+            }
+            tokens.append(" ")
+        } else if isCJK(char) {
+            //如果是中文，先结算之前的 token
+            if !currentToken.isEmpty {
+                tokens.append(currentToken)
+                currentToken = ""
+            }
+            // 中文单独成 token
+            tokens.append(String(char))
+        } else {
+            // 英文、数字、符号等，累积
+            currentToken.append(char)
+        }
+    }
+    
+    if !currentToken.isEmpty {
+        tokens.append(currentToken)
+    }
+    
+    return tokens
+}
+
+// 判断是否为 CJK 字符
+private func isCJK(_ char: Character) -> Bool {
+    guard let scalar = char.unicodeScalars.first else { return false }
+    // 简单的 CJK 范围判断
+    return scalar.value >= 0x4E00 && scalar.value <= 0x9FFF
+        || scalar.value >= 0x3000 && scalar.value <= 0x303F // 标点
+        || scalar.value >= 0xFF00 && scalar.value <= 0xFFEF // 全角
+}
+             
+// MARK: - 递归节点渲染
+struct LatexNodeView: View {
+    let node: LatexNode
+    
+    var body: some View {
+        switch node {
+        case .text(let str):
+            // 使用智能分词，确保中文和英文长句都能在 FlowLayout 中正确换行
+            ForEach(Array(smartTokenize(str).enumerated()), id: \.offset) { item in
+                let token = item.element
+                if token == "\n" {
+                     // 换行符：使用一个满宽的占位元素强制换行
+                     Color.clear
+                         .frame(maxWidth: .infinity, minHeight: 1)
+                } else if token == " " {
+                     // 空格：完全不可见
+                     Text("").frame(width: 3)
+                } else {
+                     Text(token).font(.system(size: 14))
+                }
+            }
+            
+        case .inlineMath(let str):
+             MathText(text: str, size: 14)
+             
+        case .mathFunction(let name):
+             MathText(text: name, size: 14) // 正体
+             
+        case .symbol(let sym):
+             MathText(text: sym, size: 14)
+             
+        case .fraction(let num, let den):
+             FractionView(numNodes: num, denNodes: den)
+                 .padding(.horizontal, 2)
+                 
+        case .root(let content, let power):
+            rootView(content: content, power: power)
+            
+        case .script(let base, let sup, let sub):
+             scriptView(base: base, sup: sup, sub: sub)
+             
+        case .accent(let type, let content):
+             AccentView(type: type, content: content)
+             
+        case .binom(let n, let k):
+             BinomView(nNodes: n, kNodes: k)
+                 .padding(.horizontal, 2)
+                 
+        case .group(let nodes):
+             ForEach(nodes) { n in LatexNodeView(node: n) }
+        }
+    }
+    
+    // 根号视图构建 (使用 overlay 确保横线与内容同宽)
+    @ViewBuilder
+    func rootView(content: [LatexNode], power: [LatexNode]?) -> some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            // 可选的指数 (如 ³√)
+            if let p = power {
+                HStack(spacing: 0) {
+                    ForEach(p) { n in LatexNodeView(node: n).scaleEffect(0.6) }
+                }
+                .offset(y: -8)
+            }
+            
+            // 根号符号
+            Text("√")
+                .font(.system(size: 16))
+            
+            // 内容 + 顶部横线
+            HStack(spacing: 0) {
+                ForEach(content) { n in LatexNodeView(node: n) }
+            }
+            .overlay(alignment: .top) {
+                // 横线紧贴内容顶部，宽度自动匹配
+                Rectangle()
+                    .frame(height: 1)
+                    .foregroundColor(.white)
+                    .offset(y: -2)
+            }
+        }
+        .fixedSize()
+    }
+    
+    // 上下标视图构建
+    @ViewBuilder
+    func scriptView(base: [LatexNode]?, sup: [LatexNode]?, sub: [LatexNode]?) -> some View {
+        HStack(spacing: 0) {
+            if let b = base {
+                ForEach(b) { n in LatexNodeView(node: n) }
+            }
+            VStack(spacing: 0) {
+                if let s = sup {
+                    HStack(spacing:0) {
+                        ForEach(s) { n in LatexNodeView(node: n).scaleEffect(0.7) }
+                    }
+                    .offset(y: -4)
+                }
+                if let s = sub {
+                    HStack(spacing:0) {
+                        ForEach(s) { n in LatexNodeView(node: n).scaleEffect(0.7) }
+                    }
+                    .offset(y: 4)
+                }
+            }
+        }
+    }
+}
+
+// 支持装饰符号 (bar, vec, hat, dot)
+struct AccentView: View {
+    let type: String
+    let content: [LatexNode]
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // 顶部符号 - 使用 overlay 确保与内容同宽
+            ZStack {
+                // 占位，确保宽度
+                HStack(spacing: 0) {
+                    ForEach(content) { n in LatexNodeView(node: n) }
+                }
+                .opacity(0) // 隐藏，只占位
+                
+                // 真正的装饰符号
+                if type == "vec" {
+                    Image(systemName: "arrow.right").font(.system(size: 8))
+                } else if type == "bar" || type == "overline" {
+                    Rectangle().frame(height: 1).foregroundColor(.white)
+                } else if type == "hat" {
+                    Text("^").font(.system(size: 10))
+                } else if type == "dot" {
+                    Text("·").font(.system(size: 10))
+                } else if type == "tilde" || type == "widetilde" {
+                    Text("~").font(.system(size: 10))
+                }
+            }
+            .frame(height: 8) // 固定装饰符号高度
+            
+            // 实际内容
+            HStack(spacing: 0) {
+                ForEach(content) { n in LatexNodeView(node: n) }
+            }
+        }
+        .fixedSize() // 关键：防止 VStack 扩展到无限宽
+    }
+}
+
+// 二项式系数视图
+struct BinomView: View {
+    let nNodes: [LatexNode]
+    let kNodes: [LatexNode]
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            Text("(").font(.system(size: 14)).scaleEffect(y: 2.0)
+            VStack(spacing: 2) {
+                HStack(spacing: 0) {
+                     ForEach(nNodes) { n in LatexNodeView(node: n).scaleEffect(0.9) }
+                }
+                HStack(spacing: 0) {
+                     ForEach(kNodes) { n in LatexNodeView(node: n).scaleEffect(0.9) }
+                }
+            }
+            Text(")").font(.system(size: 14)).scaleEffect(y: 2.0)
+        }
+    }
+}
+
+// MARK: - 分数视图
+struct FractionView: View {
+    let numNodes: [LatexNode]
+    let denNodes: [LatexNode]
+    
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 0) {
+                ForEach(numNodes) { n in LatexNodeView(node: n).scaleEffect(0.9) }
+            }
+            Rectangle().frame(height: 1).foregroundColor(.white)
+            HStack(spacing: 0) {
+                ForEach(denNodes) { n in LatexNodeView(node: n).scaleEffect(0.9) }
+            }
+        }
+        .fixedSize()
+    }
+}
+
+// MARK: - 混合内容视图 (Entry Point)
+struct MixedContentView: View {
+    let text: String
+    
+    var body: some View {
+        let parts = text.components(separatedBy: "```")
+        VStack(alignment: .leading, spacing: 6) {
+             ForEach(parts.indices, id: \.self) { i in
+                 if i % 2 == 1 {
+                     // 代码块
+                     VStack(alignment: .leading, spacing: 0) {
+                         Text(parts[i].trimmingCharacters(in: .whitespacesAndNewlines))
+                             .font(.system(size: 11, design: .monospaced))
+                             .foregroundColor(.green.opacity(0.8))
+                             .padding(8)
+                     }
+                     .background(Color.black.opacity(0.4))
+                     .cornerRadius(6)
+                     .frame(maxWidth: .infinity, alignment: .leading)
+                 } else {
+                     // 普通文本 (支持公式)
+                     let part = parts[i]
+                     if !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                         MessageContentView(text: part)
+                     }
+                 }
+             }
+        }
     }
 }

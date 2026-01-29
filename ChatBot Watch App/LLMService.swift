@@ -23,10 +23,10 @@ class LLMService: NSObject {
         }
     }
 
-    func streamChat(messages: [ChatMessage], modelId: String, config: ProviderConfig) -> AsyncThrowingStream<String, Error> {
+    func streamChat(messages: [ChatMessage], modelId: String, config: ProviderConfig, temperature: Double = 0.7) -> AsyncThrowingStream<String, Error> {
         switch config.apiType {
-        case .openAI: return streamOpenAIChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
-        case .gemini: return streamGeminiChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
+        case .openAI: return streamOpenAIChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
+        case .gemini: return streamGeminiChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         }
     }
     
@@ -53,7 +53,7 @@ class LLMService: NSObject {
         }.filter { $0.id.contains("gemini") }.sorted { $0.id < $1.id }
     }
     
-    private func streamOpenAIChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String) -> AsyncThrowingStream<String, Error> {
+    private func streamOpenAIChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 let openAIMessages: [[String: Any]] = messages.map { msg in
@@ -63,7 +63,7 @@ class LLMService: NSObject {
                     }
                     return ["role": msg.role.rawValue, "content": content]
                 }
-                let body: [String: Any] = ["model": modelId, "messages": openAIMessages, "stream": true]
+                let body: [String: Any] = ["model": modelId, "messages": openAIMessages, "stream": true, "temperature": temperature]
                 guard var req = buildRequest(baseURL: baseURL, path: "chat/completions", apiKey: apiKey, type: .openAI) else { continuation.finish(throwing: URLError(.badURL)); return }
                 req.httpMethod = "POST"
                 req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -118,7 +118,7 @@ class LLMService: NSObject {
         }
     }
     
-    private func streamGeminiChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String) -> AsyncThrowingStream<String, Error> {
+    private func streamGeminiChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 let contents: [[String: Any]] = messages.map { msg in
@@ -128,7 +128,8 @@ class LLMService: NSObject {
                     let role = (msg.role == .user) ? "user" : "model"
                     return ["role": role, "parts": parts]
                 }
-                let body: [String: Any] = ["contents": contents]
+                let generationConfig: [String: Any] = ["temperature": temperature]
+                let body: [String: Any] = ["contents": contents, "generationConfig": generationConfig]
                 let path = "models/\(modelId):streamGenerateContent?alt=sse"
                 
                 guard var req = buildRequest(baseURL: baseURL, path: path, apiKey: apiKey, type: .gemini) else { continuation.finish(throwing: URLError(.badURL)); return }

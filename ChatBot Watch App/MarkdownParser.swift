@@ -26,23 +26,22 @@ struct MarkdownParser {
                 }
                 
                 // 给代码块加一个视觉标记 (如果需要)
-                result += "───\n\(codeContent)\n───"
+                result += "\n\(codeContent)\n"
             } else {
                 // --- 普通文本部分 ---
                 // 正常解析 LaTeX 和 Markdown
-                result += formatNormalText(part)
+                result += cleanMarkdown(part)
             }
         }
         
         return result
     }
     
-    // 原有的解析逻辑，封装为私有方法
-    private static func formatNormalText(_ text: String) -> String {
-        // 1. 先进行 LaTeX 解析
-        var r = LaTeXParser.parse(text)
+    // 公开：清洗 Markdown 格式 (表格、标题、列表等)，但不解析 LaTeX
+    static func cleanMarkdown(_ text: String) -> String {
+        var r = text
         
-        // 2. 表格处理
+        // 表格处理
         if r.contains("|") {
             var lines = r.components(separatedBy: "\n")
             var inTable = false
@@ -53,7 +52,7 @@ struct MarkdownParser {
                     
                     // 分割线处理：短分割线，防折行
                     if line.contains("---") {
-                        lines[i] = "──────" 
+                        lines[i] = "" 
                     } else {
                         // 内容行：恢复竖线分隔，用全角竖线或带空格的竖线
                         var formatted = line.replacingOccurrences(of: "|", with: " │ ")
@@ -69,29 +68,36 @@ struct MarkdownParser {
             r = lines.joined(separator: "\n")
         }
         
-        // 标题简化
-        r = r.replacingOccurrences(of: "\n#### ", with: "\n• ")
-        r = r.replacingOccurrences(of: "\n### ", with: "\n▪ ")
-        r = r.replacingOccurrences(of: "\n## ", with: "\n▌")
-        r = r.replacingOccurrences(of: "\n# ", with: "\n【")
-        if r.hasPrefix("# ") { r = "【" + r.dropFirst(2) }
+        // 标题简化 - 只移除 # 符号，不添加可见标记
+        r = r.replacingOccurrences(of: "\n#### ", with: "\n")
+        r = r.replacingOccurrences(of: "\n### ", with: "\n")
+        r = r.replacingOccurrences(of: "\n## ", with: "\n")
+        r = r.replacingOccurrences(of: "\n# ", with: "\n")
+        if r.hasPrefix("#### ") { r = String(r.dropFirst(5)) }
+        if r.hasPrefix("### ") { r = String(r.dropFirst(4)) }
+        if r.hasPrefix("## ") { r = String(r.dropFirst(3)) }
+        if r.hasPrefix("# ") { r = String(r.dropFirst(2)) }
         
         // 列表符号
         r = r.replacingOccurrences(of: "\n- [ ] ", with: "\n☐ ")
         r = r.replacingOccurrences(of: "\n- [x] ", with: "\n☑ ")
         r = r.replacingOccurrences(of: "\n- [X] ", with: "\n☑ ")
-        r = r.replacingOccurrences(of: "\n- ", with: "\n• ")
-        r = r.replacingOccurrences(of: "\n* ", with: "\n• ")
-        r = r.replacingOccurrences(of: "\n> ", with: "\n┃ ")
+        r = r.replacingOccurrences(of: "\n- ", with: "\n- ")
+        r = r.replacingOccurrences(of: "\n* ", with: "\n- ")
+        r = r.replacingOccurrences(of: "\n> ", with: "\n| ")
         
         // 分割线
-        r = r.replacingOccurrences(of: "\n---\n", with: "\n──────\n")
-        r = r.replacingOccurrences(of: "\n***\n", with: "\n──────\n")
+        r = r.replacingOccurrences(of: "\n---\n", with: "\n")
+        r = r.replacingOccurrences(of: "\n***\n", with: "\n")
         
         // 行内格式 (简单移除标记)
+        // 注意：如果我们想要 MessageContentView 支持加粗，这里不应该移除 **。
+        // 但 MarkdownParser.format 还是返回 String 给 Text 用。
+        // 为了兼容旧逻辑，我们必须移除。
+        // 为了新逻辑... 我们可能需要一个可选参数？
+        // 暂时保持原样，因为 MessageContentView 现在使用 splitText 按空格分，markdown 也不太好支持。
         r = r.replacingOccurrences(of: "**", with: "")
         r = r.replacingOccurrences(of: "~~", with: "")
-        // 注意：不移除行内代码 `，因为它通常很短，不会造成混淆，或者可以视情况保留
         r = r.replacingOccurrences(of: "`", with: "") 
         
         return r

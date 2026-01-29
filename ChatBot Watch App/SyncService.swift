@@ -12,7 +12,8 @@ class SyncService: ObservableObject {
         "savedProviders_v3_gemini", // 兼容旧Key
         "selectedGlobalModelID",
         "showModelNameInNavBar",
-        "showScrollToBottomButton"
+        "showScrollToBottomButton",
+        "chatSessions_v1" // 新增：同步聊天记录
     ]
     
     private init() {

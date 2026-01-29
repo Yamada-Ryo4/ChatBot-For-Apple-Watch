@@ -33,41 +33,75 @@ struct SimpleEntry: TimelineEntry {
     let title: String
 }
 // MARK: - Widget View (UI)
+// MARK: - Widget View (UI)
 struct ChatBotWidgetEntryView : View {
+    @Environment(\.widgetFamily) var family
     var entry: Provider.Entry
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // 顶部：最近对话摘要
-            Link(destination: URL(string: "chatbot://last")!) {
-                VStack(alignment: .leading) {
-                    Text(entry.title)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(entry.lastMessage)
-                        .font(.system(size: 12))
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        switch family {
+        case .accessoryCircular:
+            // 圆形: 简单清晰的图标
+            ZStack {
+                AccessoryWidgetBackground()
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.title3)
+            }
+            .widgetURL(URL(string: "chatbot://last"))
+            
+        case .accessoryCorner:
+            // 角落: 图标 + 弧形文字
+            Image(systemName: "bubble.left.fill")
+                .font(.title2)
+                .widgetLabel {
+                    Text(entry.lastMessage) // 显示消息摘要而非标题，信息量更大
+                }
+            .widgetURL(URL(string: "chatbot://last"))
+            
+        case .accessoryInline:
+            // 顶部文字: 简洁的一行
+            ViewThatFits {
+                Text("💬 \(entry.lastMessage)")
+                Text("ChatBot")
+            }
+            .widgetURL(URL(string: "chatbot://last"))
+            
+
+        default:
+            // Smart Stack (这里不需要变，之前写的就可以)
+            VStack(alignment: .leading, spacing: 4) {
+                // 顶部：最近对话摘要
+                Link(destination: URL(string: "chatbot://last")!) {
+                    VStack(alignment: .leading) {
+                        Text(entry.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(entry.lastMessage)
+                            .font(.system(size: 12))
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                
+                Spacer()
+                
+                // 底部：新对话按钮
+                Link(destination: URL(string: "chatbot://new")!) {
+                    HStack {
+                        Image(systemName: "plus.circle.fill")
+                        Text("New Chat")
+                            .fontWeight(.bold)
+                    }
+                    .font(.caption)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.2))
+                    .cornerRadius(8)
                 }
             }
-            
-            Spacer()
-            
-            // 底部：新对话按钮
-            Link(destination: URL(string: "chatbot://new")!) {
-                HStack {
-                    Image(systemName: "plus.circle.fill")
-                    Text("New Chat")
-                        .fontWeight(.bold)
-                }
-                .font(.caption)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
-                .background(Color.blue.opacity(0.2))
-                .cornerRadius(8)
+            .containerBackground(for: .widget) {
+                Color.black
             }
-        }
-        .containerBackground(for: .widget) {
-            Color.black
         }
     }
 }
@@ -79,8 +113,8 @@ struct ChatBotWidget: Widget {
         StaticConfiguration(kind: kind, provider: Provider()) { entry in
             ChatBotWidgetEntryView(entry: entry)
         }
-        .configurationDisplayName("ChatBot Quick Access")
-        .description("Quickly start a new chat or resume the last one.")
-        .supportedFamilies([.accessoryRectangular]) // Smart Stack 主要用这个
+        .configurationDisplayName("ChatBot")
+        .description("Quick access to your AI assistant.")
+        .supportedFamilies([.accessoryRectangular, .accessoryCircular, .accessoryCorner, .accessoryInline])
     }
 }
