@@ -5,6 +5,8 @@ import Foundation
 enum APIType: String, Codable, Sendable, CaseIterable, Identifiable {
     case openAI = "OpenAI 兼容"
     case gemini = "Google Gemini"
+    case openAIResponses = "OpenAI Responses"
+    case anthropic = "Anthropic"
     var id: String { rawValue }
 }
 
@@ -42,8 +44,17 @@ struct ProviderConfig: Identifiable, Codable, Hashable, Sendable {
     var isPreset: Bool
     var icon: String
     var apiType: APIType = .openAI
-    var savedModels: [AIModelInfo] = []
+    var availableModels: [AIModelInfo] = []  // 所有可用模型（从 API 获取）
+    var favoriteModelIds: [String] = []       // 收藏的模型 ID
     var isValidated: Bool = false
+    var lastUsedModelId: String? = nil        // 最近使用的模型 ID
+    var modelsLastFetched: Date? = nil        // 模型列表上次获取时间（用于缓存）
+    
+    // 向后兼容：savedModels 映射到 availableModels
+    var savedModels: [AIModelInfo] {
+        get { availableModels }
+        set { availableModels = newValue }
+    }
     
     // 兼容性：保留单 Key 访问接口
     var apiKey: String {
@@ -61,6 +72,20 @@ struct ProviderConfig: Identifiable, Codable, Hashable, Sendable {
         currentKeyIndex = (currentKeyIndex + 1) % apiKeys.count
     }
     
+    // 检查模型是否被收藏
+    func isModelFavorited(_ modelId: String) -> Bool {
+        favoriteModelIds.contains(modelId)
+    }
+    
+    // 切换模型收藏状态
+    mutating func toggleFavorite(_ modelId: String) {
+        if let index = favoriteModelIds.firstIndex(of: modelId) {
+            favoriteModelIds.remove(at: index)
+        } else {
+            favoriteModelIds.append(modelId)
+        }
+    }
+    
     // 兼容旧数据的初始化器
     init(name: String, baseURL: String, apiKey: String, isPreset: Bool, icon: String, apiType: APIType = .openAI, savedModels: [AIModelInfo] = [], isValidated: Bool = false) {
         self.name = name
@@ -70,7 +95,8 @@ struct ProviderConfig: Identifiable, Codable, Hashable, Sendable {
         self.isPreset = isPreset
         self.icon = icon
         self.apiType = apiType
-        self.savedModels = savedModels
+        self.availableModels = savedModels
+        self.favoriteModelIds = savedModels.map { $0.id }  // 初始预设模型默认收藏
         self.isValidated = isValidated
     }
 }
@@ -79,4 +105,14 @@ struct AIModelInfo: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var displayName: String?
     var name: String { id }
+}
+
+// MARK: - 配置导出/导入结构
+
+struct ExportableConfig: Codable {
+    var providers: [ProviderConfig]
+    var selectedGlobalModelID: String
+    var temperature: Double
+    var historyMessageCount: Int
+    var customSystemPrompt: String
 }

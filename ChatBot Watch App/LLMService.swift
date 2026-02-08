@@ -18,8 +18,9 @@ class LLMService: NSObject {
 
     func fetchModels(config: ProviderConfig) async throws -> [AIModelInfo] {
         switch config.apiType {
-        case .openAI: return try await fetchOpenAIModels(baseURL: config.baseURL, apiKey: config.apiKey)
+        case .openAI, .openAIResponses: return try await fetchOpenAIModels(baseURL: config.baseURL, apiKey: config.apiKey)
         case .gemini: return try await fetchGeminiModels(baseURL: config.baseURL, apiKey: config.apiKey)
+        case .anthropic: return try await fetchAnthropicModels(baseURL: config.baseURL, apiKey: config.apiKey)
         }
     }
 
@@ -27,6 +28,8 @@ class LLMService: NSObject {
         switch config.apiType {
         case .openAI: return streamOpenAIChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         case .gemini: return streamGeminiChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
+        case .openAIResponses: return streamOpenAIResponses(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
+        case .anthropic: return streamAnthropicChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         }
     }
     
@@ -175,6 +178,199 @@ class LLMService: NSObject {
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
+    
+    // MARK: - Anthropic Models Fetch
+    private func fetchAnthropicModels(baseURL: String, apiKey: String) async throws -> [AIModelInfo] {
+        // Anthropic 不提供模型列表 API，返回预设的模型列表
+        return [
+            AIModelInfo(id: "claude-3-5-sonnet-20241022", displayName: "Claude 3.5 Sonnet"),
+            AIModelInfo(id: "claude-3-5-haiku-20241022", displayName: "Claude 3.5 Haiku"),
+            AIModelInfo(id: "claude-3-opus-20240229", displayName: "Claude 3 Opus"),
+            AIModelInfo(id: "claude-3-sonnet-20240229", displayName: "Claude 3 Sonnet"),
+            AIModelInfo(id: "claude-3-haiku-20240307", displayName: "Claude 3 Haiku")
+        ]
+    }
+    
+    // MARK: - OpenAI Responses API (新格式)
+    private func streamOpenAIResponses(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                // 构建 input 数组格式
+                var inputItems: [[String: Any]] = []
+                for msg in messages {
+                    var item: [String: Any] = ["role": msg.role.rawValue]
+                    if let imgData = msg.imageData {
+                        // 多模态内容
+                        item["content"] = [
+                            ["type": "input_text", "text": msg.text],
+                            ["type": "input_image", "image_url": "data:image/jpeg;base64,\(imgData.base64EncodedString())"]
+                        ]
+                    } else {
+                        item["content"] = msg.text
+                    }
+                    inputItems.append(item)
+                }
+                
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "input": inputItems,
+                    "stream": true,
+                    "temperature": temperature
+                ]
+                
+                guard var req = buildRequest(baseURL: baseURL, path: "responses", apiKey: apiKey, type: .openAIResponses) else {
+                    continuation.finish(throwing: URLError(.badURL))
+                    return
+                }
+                req.httpMethod = "POST"
+                req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+                
+                await performStream(request: req, continuation: continuation) { line in
+                    guard line.hasPrefix("data: ") else {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "" {
+                            print("⚠️ OpenAI Responses 非标准行: \(line.prefix(200))")
+                            return "[RAW] " + line
+                        }
+                        return nil
+                    }
+                    let json = String(line.dropFirst(6))
+                    if json.trimmingCharacters(in: .whitespaces) == "[DONE]" { return nil }
+                    
+                    if let data = json.data(using: .utf8),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        // 检查错误
+                        if let error = dict["error"] as? [String: Any], let message = error["message"] as? String {
+                            return "❌ API错误: " + message
+                        }
+                        
+                        // 解析 response.output_text.delta 事件
+                        if let eventType = dict["type"] as? String {
+                            if eventType == "response.output_text.delta" {
+                                if let delta = dict["delta"] as? String { return delta }
+                            }
+                            // 处理思考内容 (如果有)
+                            if eventType == "response.reasoning.delta" {
+                                if let delta = dict["delta"] as? String { return "🧠THINK:" + delta }
+                            }
+                        }
+                        
+                        // 兼容旧的 choices 格式 (某些兼容 API 可能使用)
+                        if let choices = dict["choices"] as? [[String: Any]],
+                           let delta = choices.first?["delta"] as? [String: Any],
+                           let content = delta["content"] as? String {
+                            return content
+                        }
+                    }
+                    return nil
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+    
+    // MARK: - Anthropic Messages API
+    private func streamAnthropicChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                // 分离 system 消息和其他消息
+                var systemPrompt = ""
+                var anthropicMessages: [[String: Any]] = []
+                
+                for msg in messages {
+                    if msg.role == .system {
+                        systemPrompt += (systemPrompt.isEmpty ? "" : "\n") + msg.text
+                        continue
+                    }
+                    
+                    let role = msg.role == .user ? "user" : "assistant"
+                    var content: Any
+                    
+                    if let imgData = msg.imageData {
+                        // 多模态内容
+                        content = [
+                            ["type": "image", "source": [
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": imgData.base64EncodedString()
+                            ]],
+                            ["type": "text", "text": msg.text]
+                        ]
+                    } else {
+                        content = msg.text
+                    }
+                    anthropicMessages.append(["role": role, "content": content])
+                }
+                
+                var body: [String: Any] = [
+                    "model": modelId,
+                    "messages": anthropicMessages,
+                    "max_tokens": 4096,
+                    "stream": true,
+                    "temperature": temperature
+                ]
+                if !systemPrompt.isEmpty {
+                    body["system"] = systemPrompt
+                }
+                
+                guard var req = buildRequest(baseURL: baseURL, path: "messages", apiKey: apiKey, type: .anthropic) else {
+                    continuation.finish(throwing: URLError(.badURL))
+                    return
+                }
+                req.httpMethod = "POST"
+                req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+                
+                await performStream(request: req, continuation: continuation) { line in
+                    guard line.hasPrefix("data: ") else {
+                        // 处理 event: 行（Anthropic SSE 格式）
+                        if line.hasPrefix("event: ") { return nil }
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && trimmed != "" {
+                            print("⚠️ Anthropic 非标准行: \(line.prefix(200))")
+                        }
+                        return nil
+                    }
+                    let json = String(line.dropFirst(6))
+                    
+                    if let data = json.data(using: .utf8),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        // 检查错误
+                        if let error = dict["error"] as? [String: Any], let message = error["message"] as? String {
+                            return "❌ API错误: " + message
+                        }
+                        
+                        // 解析事件类型
+                        if let eventType = dict["type"] as? String {
+                            switch eventType {
+                            case "content_block_delta":
+                                if let delta = dict["delta"] as? [String: Any] {
+                                    // text delta
+                                    if let text = delta["text"] as? String {
+                                        return text
+                                    }
+                                    // thinking delta (Claude 思考模式)
+                                    if let thinking = delta["thinking"] as? String {
+                                        return "🧠THINK:" + thinking
+                                    }
+                                }
+                            case "message_stop", "message_delta":
+                                return nil
+                            case "error":
+                                if let error = dict["error"] as? [String: Any],
+                                   let message = error["message"] as? String {
+                                    return "❌ " + message
+                                }
+                            default:
+                                break
+                            }
+                        }
+                    }
+                    return nil
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
 
     private func validateResponse(_ response: URLResponse?, data: Data) throws {
         guard let httpResponse = response as? HTTPURLResponse else { return }
@@ -191,10 +387,13 @@ class LLMService: NSObject {
         if cleanBase.hasSuffix("/") { cleanBase = String(cleanBase.dropLast()) }
         var fullPath = ""
         switch type {
-        case .openAI: fullPath = "\(cleanBase)/\(path)"
+        case .openAI, .openAIResponses: fullPath = "\(cleanBase)/\(path)"
         case .gemini:
             if cleanBase.contains("/v1beta") { fullPath = "\(cleanBase)/\(path)" }
             else { fullPath = "\(cleanBase)/v1beta/\(path)" }
+        case .anthropic:
+            if cleanBase.contains("/v1") { fullPath = "\(cleanBase)/\(path)" }
+            else { fullPath = "\(cleanBase)/v1/\(path)" }
         }
         guard let url = URL(string: fullPath) else { return nil }
         var request = URLRequest(url: url)
@@ -204,8 +403,11 @@ class LLMService: NSObject {
         request.addValue("*/*", forHTTPHeaderField: "Accept")
         
         switch type {
-        case .openAI: request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        case .openAI, .openAIResponses: request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         case .gemini: request.addValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        case .anthropic:
+            request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         }
         return request
     }

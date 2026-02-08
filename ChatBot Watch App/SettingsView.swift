@@ -7,6 +7,10 @@ struct SettingsView: View {
     @State private var showDeleteAlert = false
     @State private var pendingDeleteIndexSet: IndexSet?
     
+    // 批量验证状态
+    @State private var isValidating = false
+    @State private var validationResult: String? = nil
+    
     var body: some View {
         List {
             Section(header: Text("当前对话模型")) {
@@ -113,6 +117,40 @@ struct SettingsView: View {
                 }
             }
             
+            Section(header: Text("高级")) {
+                // 批量验证按钮
+                Button {
+                    isValidating = true
+                    Task {
+                        let result = await viewModel.validateAllProviders()
+                        await MainActor.run {
+                            isValidating = false
+                            validationResult = "✅ \(result.success) 成功, ❌ \(result.failed) 失败"
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.shield")
+                        Text("批量验证供应商")
+                        Spacer()
+                        if isValidating {
+                            ProgressView()
+                        } else if let result = validationResult {
+                            Text(result).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .disabled(isValidating)
+                
+                // 导出配置
+                if let configData = viewModel.exportConfig(),
+                   let configString = String(data: configData, encoding: .utf8) {
+                    ShareLink(item: configString) {
+                        Label("导出配置", systemImage: "square.and.arrow.up")
+                    }
+                }
+            }
+            
             Section {
                 Button(role: .destructive) {
                     viewModel.clearCurrentChat()
@@ -151,6 +189,7 @@ struct ProviderDetailView: View {
     @State private var isFetching = false
     @State private var fetchError: String? = nil
     @State private var fetchedOnlineModels: [AIModelInfo] = []
+    @State private var modelSearchText = ""  // 模型搜索
     
     //引入本地临时状态，防止输入过程中触发父视图刷新导致键盘断连
     @State private var draftConfig: ProviderConfig = ProviderConfig(name: "", baseURL: "", apiKey: "", isPreset: false, icon: "")
@@ -158,12 +197,8 @@ struct ProviderDetailView: View {
     var body: some View {
         Form {
             Section(header: Text("连接信息")) {
-                if !draftConfig.isPreset {
-                    TextField("名称", text: $draftConfig.name)
-                    Picker("类型", selection: $draftConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
-                } else {
-                    HStack { Text("类型"); Spacer(); Text(draftConfig.apiType.rawValue).foregroundColor(.gray) }
-                }
+                TextField("名称", text: $draftConfig.name)
+                Picker("类型", selection: $draftConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
                 VStack(alignment: .leading) {
                     Text("Base URL").font(.caption).foregroundColor(.gray)
                     TextField("https://...", text: $draftConfig.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
@@ -224,9 +259,17 @@ struct ProviderDetailView: View {
                 }
             }
             
-            if !fetchedOnlineModels.isEmpty || !draftConfig.savedModels.isEmpty {
-                Section(header: Text("可用模型 (点击收藏)")) {
-                    let displayModels = mergeModels()
+            if !fetchedOnlineModels.isEmpty || !draftConfig.availableModels.isEmpty {
+                Section(header: Text("可用模型")) {
+                    // 搜索框
+                    TextField("搜索模型...", text: $modelSearchText)
+                        .textInputAutocapitalization(.never)
+                    
+                    let displayModels = mergeModels().filter { model in
+                        modelSearchText.isEmpty ||
+                        model.id.localizedCaseInsensitiveContains(modelSearchText) ||
+                        (model.displayName?.localizedCaseInsensitiveContains(modelSearchText) ?? false)
+                    }
                     ForEach(displayModels) { model in
                         Button { toggleDraftModelFavorite(model: model) } label: {
                             HStack {
@@ -235,7 +278,7 @@ struct ProviderDetailView: View {
                                     if let display = model.displayName { Text(display).font(.caption2).foregroundColor(.blue) }
                                 }
                                 Spacer()
-                                if draftConfig.savedModels.contains(where: { $0.id == model.id }) { Image(systemName: "star.fill").foregroundColor(.yellow) }
+                                if draftConfig.isModelFavorited(model.id) { Image(systemName: "star.fill").foregroundColor(.yellow) }
                                 else { Image(systemName: "star").foregroundColor(.gray) }
                             }
                         }
@@ -257,16 +300,16 @@ struct ProviderDetailView: View {
     
     // 需要针对 draftConfig 的本地收藏逻辑
     func toggleDraftModelFavorite(model: AIModelInfo) {
-        if let index = draftConfig.savedModels.firstIndex(where: { $0.id == model.id }) {
-            draftConfig.savedModels.remove(at: index)
-        } else {
-            draftConfig.savedModels.append(model)
+        draftConfig.toggleFavorite(model.id)
+        // 同时确保模型在 availableModels 中
+        if !draftConfig.availableModels.contains(where: { $0.id == model.id }) {
+            draftConfig.availableModels.append(model)
         }
     }
     
     func mergeModels() -> [AIModelInfo] {
         var set = Set<String>()
-        var result = draftConfig.savedModels
+        var result = draftConfig.availableModels
         for m in result { set.insert(m.id) }
         for m in fetchedOnlineModels { if !set.contains(m.id) { result.append(m) } }
         return result.sorted { $0.id < $1.id }
@@ -360,43 +403,147 @@ struct AddProviderView: View {
 // MARK: - 模型选择层级视图
 struct ModelSelectionRootView: View {
     @ObservedObject var viewModel: ChatViewModel
+    @State private var searchText = ""
+    
+    // 过滤后的收藏模型
+    var filteredFavorites: [(id: String, displayName: String, providerName: String)] {
+        if searchText.isEmpty { return viewModel.allFavoriteModels }
+        return viewModel.allFavoriteModels.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.providerName.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
+    // 过滤后的最近使用
+    var filteredRecent: [(id: String, displayName: String, providerName: String)] {
+        if searchText.isEmpty { return viewModel.recentlyUsedModels }
+        return viewModel.recentlyUsedModels.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.providerName.localizedCaseInsensitiveContains(searchText)
+        }
+    }
     
     var body: some View {
         List {
-            ForEach(viewModel.providers) { provider in
-                if !provider.savedModels.isEmpty {
-                    NavigationLink {
-                        ModelListForProviderView(viewModel: viewModel, provider: provider)
-                    } label: {
-                        Label(provider.name, systemImage: provider.icon)
+            // 搜索框
+            TextField("搜索模型...", text: $searchText)
+                .textInputAutocapitalization(.never)
+            
+            // 最近使用模型部分
+            if !filteredRecent.isEmpty {
+                Section(header: Text("🕐 最近使用")) {
+                    ForEach(filteredRecent, id: \.id) { item in
+                        let isSelected = (viewModel.selectedGlobalModelID == item.id)
+                        Button(action: {
+                            viewModel.selectedGlobalModelID = item.id
+                        }) {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.displayName)
+                                        .foregroundColor(isSelected ? .blue : .primary)
+                                    Text(item.providerName)
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                                if isSelected {
+                                    Image(systemName: "checkmark").foregroundColor(.blue)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 收藏模型部分
+            if !filteredFavorites.isEmpty {
+                Section(header: Text("⭐ 收藏模型")) {
+                    ForEach(filteredFavorites, id: \.id) { item in
+                        let isSelected = (viewModel.selectedGlobalModelID == item.id)
+                        Button(action: {
+                            viewModel.selectedGlobalModelID = item.id
+                        }) {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.displayName)
+                                        .foregroundColor(isSelected ? .blue : .primary)
+                                    Text(item.providerName)
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                                if isSelected {
+                                    Image(systemName: "checkmark").foregroundColor(.blue)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // 按供应商显示所有模型（搜索时隐藏）
+            if searchText.isEmpty {
+                Section(header: Text("所有模型")) {
+                    ForEach(viewModel.providers) { provider in
+                        if !provider.availableModels.isEmpty {
+                            NavigationLink {
+                                ModelListForProviderView(viewModel: viewModel, provider: provider)
+                            } label: {
+                                HStack {
+                                    Image(systemName: provider.icon)
+                                        .frame(width: 20)
+                                    Text(provider.name)
+                                    Spacer()
+                                    Text("\(provider.availableModels.count)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        .navigationTitle("选择供应商")
+        .navigationTitle("选择模型")
     }
 }
 
 struct ModelListForProviderView: View {
     @ObservedObject var viewModel: ChatViewModel
     let provider: ProviderConfig
-    @Environment(\.dismiss) var dismiss // 用于选中后返回
+    @Environment(\.dismiss) var dismiss
+    @State private var searchText = ""
+    
+    // 过滤后的模型列表
+    var filteredModels: [AIModelInfo] {
+        if searchText.isEmpty {
+            return provider.availableModels
+        }
+        return provider.availableModels.filter {
+            $0.id.localizedCaseInsensitiveContains(searchText) ||
+            ($0.displayName?.localizedCaseInsensitiveContains(searchText) ?? false)
+        }
+    }
     
     var body: some View {
         List {
-            ForEach(provider.savedModels) { model in
+            // 搜索框
+            TextField("搜索模型...", text: $searchText)
+                .textInputAutocapitalization(.never)
+            
+            ForEach(filteredModels) { model in
                 let compositeID = "\(provider.id.uuidString)|\(model.id)"
                 let isSelected = (viewModel.selectedGlobalModelID == compositeID)
                 
                 Button(action: {
                     viewModel.selectedGlobalModelID = compositeID
-                    dismiss() // 选中后返回上一级（或连续返回，但这里先返回一级）
+                    dismiss()
                 }) {
                     HStack {
                         VStack(alignment: .leading) {
                             Text(model.displayName ?? model.id)
                                 .foregroundColor(isSelected ? .blue : .primary)
-                            if let display = model.displayName {
+                            if model.displayName != nil {
                                 Text(model.id).font(.caption2).foregroundColor(.gray)
                             }
                         }

@@ -34,41 +34,98 @@ class ChatViewModel: ObservableObject {
         isLoading = false
     }
     init() {
-        // 使用 v15 强制刷新预设，内置用户配置的 Key
-        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_v15")
-        if hasLoaded, let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
-            self.providers = decoded
+        // 预设版本号 - 更新时会智能合并，不会丢失用户数据
+        let currentVersion = "v20"
+        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_\(currentVersion)")
+        
+        // 定义最新的预设供应商
+        let latestPresets: [ProviderConfig] = [
+            ProviderConfig(name: "智谱AI", baseURL: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", isPreset: true, icon: "sparkles"),
+            ProviderConfig(name: "OpenAI", baseURL: "https://api.openai.com/v1", apiKey: "", isPreset: true, icon: "globe"),
+            ProviderConfig(name: "Anthropic", baseURL: "https://api.anthropic.com", apiKey: "", isPreset: true, icon: "a.circle.fill", apiType: .anthropic),
+            ProviderConfig(name: "DeepSeek", baseURL: "https://api.deepseek.com", apiKey: "", isPreset: true, icon: "brain"),
+            ProviderConfig(name: "Nvidia", baseURL: "https://integrate.api.nvidia.com/v1", apiKey: "", isPreset: true, icon: "bolt.horizontal.fill"),
+            ProviderConfig(name: "硅基流动", baseURL: "https://api.siliconflow.cn/v1", apiKey: "", isPreset: true, icon: "cpu"),
+            ProviderConfig(name: "阿里云百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", isPreset: true, icon: "cloud"),
+            ProviderConfig(name: "ModelScope", baseURL: "https://api-inference.modelscope.cn/v1", apiKey: "", isPreset: true, icon: "cube"),
+            ProviderConfig(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKey: "", isPreset: true, icon: "network"),
+            ProviderConfig(name: "Gemini", baseURL: "https://gemini.yamadaryo.me/v1beta", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini),
+            ProviderConfig(name: "OpenCode Zen", baseURL: "https://opencode.ai/zen/v1", apiKey: "", isPreset: true, icon: "sparkle", apiType: .openAI)
+        ]
+        
+        if let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
+            if hasLoaded {
+                // 已加载过当前版本，直接使用保存的数据
+                self.providers = decoded
+                
+                // 启动时自动验证有 Key 但未验证的供应商
+                Task {
+                    for i in 0..<self.providers.count {
+                        if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
+                            await self.autoValidateProvider(index: i)
+                        }
+                    }
+                }
+            } else {
+                // 需要更新预设，但保留用户数据（收藏、可用模型、验证状态等）
+                var mergedProviders: [ProviderConfig] = []
+                
+                // 先处理预设供应商：用新配置但保留用户数据
+                for preset in latestPresets {
+                    if let existing = decoded.first(where: { $0.name == preset.name && $0.isPreset }) {
+                        // 用新的 URL/Key，但保留用户的收藏和模型数据
+                        var updated = preset
+                        updated.id = existing.id  // 保持 ID 以维持选择状态
+                        updated.availableModels = existing.availableModels
+                        updated.favoriteModelIds = existing.favoriteModelIds
+                        updated.isValidated = existing.isValidated
+                        updated.lastUsedModelId = existing.lastUsedModelId
+                        updated.modelsLastFetched = existing.modelsLastFetched
+                        // 如果用户自己配置了 Key，保留用户的
+                        if !existing.apiKey.isEmpty && preset.apiKey.isEmpty {
+                            updated.apiKeys = existing.apiKeys
+                            updated.currentKeyIndex = existing.currentKeyIndex
+                        }
+                        mergedProviders.append(updated)
+                    } else {
+                        // 新增的预设供应商
+                        mergedProviders.append(preset)
+                    }
+                }
+                
+                // 再添加用户自定义的非预设供应商
+                for custom in decoded where !custom.isPreset {
+                    mergedProviders.append(custom)
+                }
+                
+                self.providers = mergedProviders
+                UserDefaults.standard.set(true, forKey: "hasLoadedPresets_\(currentVersion)")
+                saveProviders()
+                print("✅ 预设已更新到 \(currentVersion)，用户数据已保留")
+                
+                // 版本更新后，验证未验证的供应商
+                Task {
+                    for i in 0..<self.providers.count {
+                        if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
+                            await self.autoValidateProvider(index: i)
+                        }
+                    }
+                }
+            }
         } else {
-            // 智谱AI 默认配置，包含免费模型 GLM-4.6V-Flash
-            let zhipuDefaultModel = AIModelInfo(id: "GLM-4.6V-Flash", displayName: "GLM-4.6V-Flash (免费)")
-            let zhipuProvider = ProviderConfig(
-                name: "智谱AI",
-                baseURL: "https://open.bigmodel.cn/api/paas/v4",
-                apiKey: "",
-                isPreset: true,
-                icon: "sparkles",
-                apiType: .openAI,
-                savedModels: [zhipuDefaultModel],
-                isValidated: false
-            )
-            
-            self.providers = [
-                zhipuProvider,
-                ProviderConfig(name: "OpenAI", baseURL: "https://api.openai.com/v1", apiKey: "", isPreset: true, icon: "globe"),
-                ProviderConfig(name: "DeepSeek", baseURL: "https://api.deepseek.com", apiKey: "", isPreset: true, icon: "brain"),
-                ProviderConfig(name: "硅基流动", baseURL: "https://api.siliconflow.cn/v1", apiKey: "", isPreset: true, icon: "cpu"),
-                ProviderConfig(name: "阿里云百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", isPreset: true, icon: "cloud"),
-                ProviderConfig(name: "ModelScope", baseURL: "https://api-inference.modelscope.cn/v1", apiKey: "", isPreset: true, icon: "cube"),
-                ProviderConfig(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKey: "", isPreset: true, icon: "network"),
-                ProviderConfig(name: "Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini),
-                ProviderConfig(name: "GeminCLI", baseURL: "https://api.yamadaryo.me/v1", apiKey: "", isPreset: true, icon: "command", apiType: .openAI)
-            ]
-            
-            // 自动选择智谱AI的默认模型
-            selectedGlobalModelID = "\(zhipuProvider.id.uuidString)|\(zhipuDefaultModel.id)"
-            
-            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_v15")
+            // 首次安装，使用全新预设
+            self.providers = latestPresets
+            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_\(currentVersion)")
             saveProviders()
+            
+            // 首次启动时自动验证有 API Key 的供应商
+            Task {
+                for i in 0..<self.providers.count {
+                    if !self.providers[i].apiKey.isEmpty {
+                        await self.autoValidateProvider(index: i)
+                    }
+                }
+            }
         }
         if let data = UserDefaults.standard.data(forKey: "chatSessions_v1") {
             do {
@@ -185,24 +242,81 @@ class ChatViewModel: ObservableObject {
         }
     }
     
-    func fetchModelsForProvider(providerID: UUID) async {
-        guard let index = providers.firstIndex(where: { $0.id == providerID }) else { return }
+    // 自动验证供应商（首次启动时调用）
+    private func autoValidateProvider(index: Int) async {
+        guard index < providers.count else { return }
         let provider = providers[index]
         guard !provider.apiKey.isEmpty else { return }
         do {
             let models = try await service.fetchModels(config: provider)
-            self.providers[index].savedModels = models
+            await MainActor.run {
+                self.providers[index].savedModels = models
+                self.providers[index].isValidated = true
+                self.saveProviders()
+            }
+            print("✅ 自动验证成功: \(provider.name)")
+        } catch {
+            print("⚠️ 自动验证失败: \(provider.name) - \(error.localizedDescription)")
+        }
+    }
+    
+    func fetchModelsForProvider(providerID: UUID, forceRefresh: Bool = false) async {
+        guard let index = providers.firstIndex(where: { $0.id == providerID }) else { return }
+        let provider = providers[index]
+        guard !provider.apiKey.isEmpty else { return }
+        
+        // 缓存逻辑：1小时内不重复获取（除非强制刷新）
+        if !forceRefresh,
+           let lastFetch = provider.modelsLastFetched,
+           Date().timeIntervalSince(lastFetch) < 3600,
+           !provider.availableModels.isEmpty {
+            return
+        }
+        
+        do {
+            let models = try await service.fetchModels(config: provider)
+            self.providers[index].availableModels = models
             self.providers[index].isValidated = true
+            self.providers[index].modelsLastFetched = Date()
             saveProviders()
-        } catch { self.providers[index].isValidated = false }
+        } catch {
+            self.providers[index].isValidated = false
+            // 如果是认证错误且有多个 Key，尝试轮换
+            if provider.apiKeys.count > 1 {
+                self.providers[index].rotateKey()
+                saveProviders()
+            }
+        }
+    }
+    
+    // 批量验证所有有 API Key 的供应商
+    func validateAllProviders() async -> (success: Int, failed: Int) {
+        var success = 0
+        var failed = 0
+        for i in 0..<providers.count {
+            guard !providers[i].apiKey.isEmpty else { continue }
+            do {
+                let models = try await service.fetchModels(config: providers[i])
+                await MainActor.run {
+                    self.providers[i].availableModels = models
+                    self.providers[i].isValidated = true
+                    self.providers[i].modelsLastFetched = Date()
+                }
+                success += 1
+            } catch {
+                await MainActor.run {
+                    self.providers[i].isValidated = false
+                }
+                failed += 1
+            }
+        }
+        await MainActor.run { saveProviders() }
+        return (success, failed)
     }
     
     func toggleModelFavorite(providerID: UUID, model: AIModelInfo) {
         guard let index = providers.firstIndex(where: { $0.id == providerID }) else { return }
-        var currentSaved = providers[index].savedModels
-        if let existIndex = currentSaved.firstIndex(where: { $0.id == model.id }) { currentSaved.remove(at: existIndex) }
-        else { currentSaved.append(model) }
-        providers[index].savedModels = currentSaved
+        providers[index].toggleFavorite(model.id)
         saveProviders()
     }
     
@@ -216,18 +330,62 @@ class ChatViewModel: ObservableObject {
         saveProviders()
     }
     
-    var allFavoriteModels: [(id: String, displayName: String)] {
-        var list: [(String, String)] = []
+    // 获取所有收藏的模型
+    var allFavoriteModels: [(id: String, displayName: String, providerName: String)] {
+        var list: [(String, String, String)] = []
         for provider in providers {
-            for model in provider.savedModels {
+            for model in provider.availableModels where provider.isModelFavorited(model.id) {
                 let compositeID = "\(provider.id.uuidString)|\(model.id)"
                 let nameToShow = model.displayName ?? model.id
-                let displayName = "\(provider.name) / \(nameToShow)"
-                list.append((compositeID, displayName))
+                list.append((compositeID, nameToShow, provider.name))
             }
         }
         return list
     }
+    
+    // 获取所有可用模型（按供应商分组）
+    var allAvailableModels: [(provider: ProviderConfig, models: [AIModelInfo])] {
+        providers.filter { !$0.availableModels.isEmpty }.map { ($0, $0.availableModels) }
+    }
+    
+    // 获取最近使用的模型（每个供应商一个）
+    var recentlyUsedModels: [(id: String, displayName: String, providerName: String)] {
+        var list: [(String, String, String)] = []
+        for provider in providers {
+            guard let lastModelId = provider.lastUsedModelId,
+                  let model = provider.availableModels.first(where: { $0.id == lastModelId }) else { continue }
+            let compositeID = "\(provider.id.uuidString)|\(model.id)"
+            let nameToShow = model.displayName ?? model.id
+            list.append((compositeID, nameToShow, provider.name))
+        }
+        return list
+    }
+    
+    // MARK: - 配置导出/导入
+    
+    /// 导出配置为 JSON 数据
+    func exportConfig() -> Data? {
+        let exportData = ExportableConfig(
+            providers: providers,
+            selectedGlobalModelID: selectedGlobalModelID,
+            temperature: temperature,
+            historyMessageCount: historyMessageCount,
+            customSystemPrompt: customSystemPrompt
+        )
+        return try? JSONEncoder().encode(exportData)
+    }
+    
+    /// 从 JSON 数据导入配置
+    func importConfig(from data: Data) throws {
+        let config = try JSONDecoder().decode(ExportableConfig.self, from: data)
+        self.providers = config.providers
+        self.selectedGlobalModelID = config.selectedGlobalModelID
+        self.temperature = config.temperature
+        self.historyMessageCount = config.historyMessageCount
+        self.customSystemPrompt = config.customSystemPrompt
+        saveProviders()
+    }
+    
     // 缓存模型名称，避免重复计算
     private var _cachedModelName: String?
     private var _cachedModelID: String?
@@ -270,10 +428,15 @@ class ChatViewModel: ObservableObject {
         guard components.count == 2, let providerID = UUID(uuidString: String(components[0])), let modelID = String(components[1]) as String? else {
             appendSystemMessage("⚠️ 请先在设置中选择一个模型"); return
         }
-        guard let provider = providers.first(where: { $0.id == providerID }) else {
+        guard let providerIndex = providers.firstIndex(where: { $0.id == providerID }) else {
             appendSystemMessage("⚠️ 找不到供应商配置"); return
         }
+        let provider = providers[providerIndex]
         if provider.apiKey.isEmpty { appendSystemMessage("⚠️ \(provider.name) 未配置 API Key"); return }
+        
+        // 记录最近使用的模型
+        providers[providerIndex].lastUsedModelId = modelID
+        saveProviders()
         
         if currentSessionId == nil { createNewSession() }
         var msgs = currentMessages
