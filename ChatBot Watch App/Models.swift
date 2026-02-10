@@ -26,6 +26,38 @@ struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
     var imageData: Data? = nil
     var thinkingContent: String? = nil
     var isThinkingExpanded: Bool = false
+    
+    // v1.5: 时间统计
+    var sendTime: Date? = nil         // 发送时间
+    var firstTokenTime: Date? = nil   // 首 Token 到达时间
+    var completeTime: Date? = nil     // 完成时间
+    
+    // 计算属性：首 Token 延迟（毫秒）
+    var firstTokenLatencyMs: Int? {
+        guard let send = sendTime, let first = firstTokenTime else { return nil }
+        return Int(first.timeIntervalSince(send) * 1000)
+    }
+    
+    // 计算属性：生成时间（毫秒）
+    var generationTimeMs: Int? {
+        guard let first = firstTokenTime, let complete = completeTime else { return nil }
+        return Int(complete.timeIntervalSince(first) * 1000)
+    }
+    
+    // 计算属性：总时间（毫秒）
+    var totalTimeMs: Int? {
+        guard let send = sendTime, let complete = completeTime else { return nil }
+        return Int(complete.timeIntervalSince(send) * 1000)
+    }
+}
+
+// v1.8.6: Markdown 渲染模式
+enum MarkdownRenderMode: String, Codable, CaseIterable, Identifiable {
+    case realtime = "实时渲染"         // 流式时实时渲染
+    case onComplete = "完成后渲染"     // 完成后自动渲染
+    case manual = "手动渲染"           // 仅手动触发渲染
+    
+    var id: String { rawValue }
 }
 
 struct ChatSession: Identifiable, Codable, Hashable, Sendable {
@@ -33,6 +65,7 @@ struct ChatSession: Identifiable, Codable, Hashable, Sendable {
     var title: String
     var messages: [ChatMessage]
     var lastModified: Date
+    var note: String? = nil  // v1.5: 自定义备注
 }
 
 struct ProviderConfig: Identifiable, Codable, Hashable, Sendable {
@@ -114,5 +147,30 @@ struct ExportableConfig: Codable {
     var selectedGlobalModelID: String
     var temperature: Double
     var historyMessageCount: Int
-    var customSystemPrompt: String
+    var customSystemPrompt: String // 补回字段
+    var thinkingMode: ThinkingMode = .auto // v1.6: 全局思考模式策略
+    var modelSettings: [String: ModelSettings] = [:] // v1.7: 模型级设置
+}
+
+// MARK: - 模型能力配置 (v1.7)
+enum CapabilityState: String, Codable, Sendable, CaseIterable, Identifiable {
+    case auto = "自动"
+    case enabled = "开启"
+    case disabled = "关闭"
+    
+    var id: String { rawValue }
+}
+
+struct ModelSettings: Codable, Hashable, Sendable {
+    var thinking: CapabilityState = .auto
+    var vision: CapabilityState = .auto
+}
+
+// MARK: - 思考模式 (v1.6) -> 全局策略
+enum ThinkingMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case auto = "自动 / 跟随模型"
+    case enabled = "强制开启"
+    case disabled = "强制关闭"
+    
+    var id: String { rawValue }
 }

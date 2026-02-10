@@ -56,31 +56,35 @@ struct ChatView: View {
                                     
                                 } else {
                                     // 正常显示模式
-                                    PrettyMessageBubble(message: msg)
+                                    PrettyMessageBubble(message: msg, isStreaming: viewModel.isLoading && msg.id == viewModel.currentMessages.last?.id)
                                     
-                                    if msg.role == .assistant &&
+                                    // v1.5: 最后一条 AI 消息下方显示操作按钮
+                                    if msg.role == .assistant && 
                                        msg.id == viewModel.currentMessages.last?.id &&
-                                       !viewModel.isLoading &&
-                                       !msg.text.isEmpty {
-                                    HStack {
-                                        Button(action: { viewModel.regenerateLastMessage() }) {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "arrow.clockwise")
-                                                    .font(.system(size: 11))
-                                                Text("重新生成")
-                                                    .font(.system(size: 11))
+                                       !msg.text.isEmpty && 
+                                       !viewModel.isLoading {
+                                         HStack(spacing: 8) {
+                                            // 重新生成按钮
+                                            Button(action: { viewModel.regenerateLastMessage() }) {
+                                                HStack(spacing: 4) {
+                                                    Image(systemName: "arrow.clockwise")
+                                                        .font(.system(size: 11))
+                                                    Text("重新生成")
+                                                        .font(.system(size: 11))
+                                                }
+                                                .foregroundColor(.gray)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(Color.gray.opacity(0.2))
+                                                .cornerRadius(8)
                                             }
-                                            .foregroundColor(.gray)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 4)
-                                            .background(Color.gray.opacity(0.2))
-                                            .cornerRadius(8)
+                                            .buttonStyle(.plain)
+                                            
+                                            Spacer()
                                         }
-                                        .buttonStyle(.plain)
-                                        Spacer()
+                                        .padding(.leading, 4)
+                                        .padding(.top, 2)
                                     }
-                                    .padding(.leading, 4)
-                                }
                                 
                                 // 新增：如果是最后一条用户消息，且当前没有在生成，显示重新生成按钮
                                 if msg.role == .user &&
@@ -128,7 +132,7 @@ struct ChatView: View {
                             .id(msg.id)
                         }
                         
-                        // 输入区域
+                        // 底部输入区域
                         BottomInputArea(viewModel: viewModel)
                             .id(bottomID)
                             .padding(.top, 8)
@@ -184,6 +188,7 @@ struct ChatView: View {
                     }
                 }
             }
+
             .navigationTitle(viewModel.showModelNameInNavBar ? viewModel.currentDisplayModelName : "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -319,6 +324,13 @@ struct EmptyStateView: View {
 // 增强版消息气泡：支持思考内容显示
 struct PrettyMessageBubble: View {
     let message: ChatMessage
+    let isStreaming: Bool // v1.5: 性能优化，流式输出时为 true
+    
+    init(message: ChatMessage, isStreaming: Bool = false) {
+        self.message = message
+        self.isStreaming = isStreaming
+    }
+    
     @State private var isThinkingExpanded: Bool = false
     @State private var showRaw: Bool = false
     
@@ -397,11 +409,11 @@ struct PrettyMessageBubble: View {
                                 .frame(maxWidth: 150)
                                 
                                 if !textWithoutImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    MixedContentView(text: textWithoutImage)
+                                    MixedContentView(text: textWithoutImage, isStreaming: isStreaming)
                                 }
                             } else {
-                                // 使用完整 Markdown 渲染器 (支持公式)
-                                MixedContentView(text: cleanedText)
+                                // v1.8.2: 始终使用完整 Markdown 渲染器，传递流式标志
+                                MixedContentView(text: cleanedText, isStreaming: isStreaming)
                             }
                         }
                         
@@ -414,8 +426,8 @@ struct PrettyMessageBubble: View {
                                     .foregroundColor(.white.opacity(0.6))
                             }
                             .buttonStyle(.plain)
-                            .padding(.top, 4)
                         }
+                        .padding(.top, 4)
                     }
 
                     .padding(10)
@@ -430,41 +442,112 @@ struct PrettyMessageBubble: View {
     }
 }
 
-// 辅助组件 (保持不变)
+// 辅助组件 (v1.5 简化版)
 struct HistoryListView: View {
     @ObservedObject var viewModel: ChatViewModel
     @Binding var isPresented: Bool
     
-    @State private var showDeleteConfirmation = false
-    @State private var indexSetToDelete: IndexSet?
+    @State private var selectedSession: ChatSession? = nil
+    @State private var showNoteAlert = false
+    @State private var editingNote = ""
     
     var body: some View {
-        List {
-            Button("新建对话") { viewModel.createNewSession(); isPresented = false }
-                .foregroundColor(.blue)
-            
-            ForEach(viewModel.sessions) { session in
-                Button(session.title) { viewModel.selectSession(session); isPresented = false }
-            }
-            .onDelete { indices in
-                indexSetToDelete = indices
-                showDeleteConfirmation = true
-            }
-        }
-        .alert(isPresented: $showDeleteConfirmation) {
-            Alert(
-                title: Text("删除对话"),
-                message: Text("确定要删除选中的对话吗？此操作无法撤销。"),
-                primaryButton: .destructive(Text("删除")) {
-                    if let indices = indexSetToDelete {
-                        viewModel.deleteSession(at: indices)
+        NavigationStack {
+            List {
+                Button("新建对话") { viewModel.createNewSession(); isPresented = false }
+                    .foregroundColor(.blue)
+                
+                ForEach(viewModel.sessions) { session in
+                    Button(action: { viewModel.selectSession(session); isPresented = false }) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(session.title)
+                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                Text("\(session.messages.count)条")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                if let note = session.note, !note.isEmpty {
+                                    Text("·")
+                                        .foregroundColor(.secondary)
+                                    Text(note)
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
                     }
-                    indexSetToDelete = nil
-                },
-                secondaryButton: .cancel(Text("取消")) {
-                    indexSetToDelete = nil
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        // 删除
+                        Button(role: .destructive) {
+                            if let index = viewModel.sessions.firstIndex(where: { $0.id == session.id }) {
+                                viewModel.deleteSession(at: IndexSet(integer: index))
+                            }
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                        
+                        // 备注 - 用 NavigationLink
+                        NavigationLink {
+                            NoteEditNavigationView(viewModel: viewModel, session: session)
+                        } label: {
+                            Label("备注", systemImage: "note.text")
+                        }
+                        .tint(.orange)
+                        
+                        // 分享 - 用系统 ShareLink
+                        ShareLink(item: generateExportText(for: session)) {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
+                        .tint(.green)
+                    }
                 }
-            )
+            }
+            .navigationTitle("历史记录")
+        }
+    }
+    
+    // 生成导出文本
+    private func generateExportText(for session: ChatSession) -> String {
+        var text = "# \(session.title)\n\n"
+        for msg in session.messages {
+            let role = msg.role == .user ? "👤 用户" : "🤖 助手"
+            text += "## \(role)\n\(msg.text)\n\n"
+        }
+        return text
+    }
+}
+
+// 备注编辑导航视图 (用于 NavigationLink)
+struct NoteEditNavigationView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let session: ChatSession
+    @State private var editingNote: String = ""
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            TextField("输入备注", text: $editingNote)
+                .textFieldStyle(.plain)
+                .padding(8)
+                .background(Color.gray.opacity(0.2))
+                .cornerRadius(8)
+            
+            Button("保存") {
+                if let index = viewModel.sessions.firstIndex(where: { $0.id == session.id }) {
+                    viewModel.sessions[index].note = editingNote.isEmpty ? nil : editingNote
+                    viewModel.saveSessions()
+                }
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            
+            Spacer()
+        }
+        .padding()
+        .navigationTitle("编辑备注")
+        .onAppear {
+            editingNote = session.note ?? ""
         }
     }
 }
@@ -665,25 +748,62 @@ struct MathText: View {
 // MARK: - 消息内容视图 (根据设置选择渲染方式)
 struct MessageContentView: View {
     let text: String
+    let isStreaming: Bool // v1.8.2: 流式输出标记
     @EnvironmentObject var viewModel: ChatViewModel
     
+    init(text: String, isStreaming: Bool = false) {
+        self.text = text
+        self.isStreaming = isStreaming
+    }
+    
     var body: some View {
-        // Markdown 格式化始终应用
-        let markdownProcessed = MarkdownParser.cleanMarkdown(text)
+        // v1.8.6: 根据三种渲染模式判断如何显示
+        let shouldRender: Bool = {
+            switch viewModel.markdownRenderMode {
+            case .realtime:
+                return true  // 总是渲染
+            case .onComplete:
+                return !isStreaming  // 完成后才渲染
+            case .manual:
+                return !isStreaming  // 流式时显示纯文本（通过按钮切换）
+            }
+        }()
         
-        if !viewModel.latexRenderingEnabled {
-            // 关闭 LaTeX 渲染：只应用 Markdown 格式化，不转换数学符号
-            Text(markdownProcessed)
-                .font(.system(size: 14))
-                .fixedSize(horizontal: false, vertical: true)
-        } else if viewModel.advancedLatexEnabled {
-            // 高级模式：使用 FlowLayout + AST 解析
-            AdvancedLatexView(text: markdownProcessed)
+        if shouldRender {
+            // 渲染 Markdown
+            let markdownProcessed = MarkdownParser.cleanMarkdown(text)
+            
+            if !viewModel.latexRenderingEnabled {
+                // 关闭 LaTeX 渲染：只应用 Markdown 格式化，不转换数学符号
+                Text(toMarkdown(markdownProcessed))
+                    .font(.system(size: 14))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if viewModel.advancedLatexEnabled {
+                // 高级模式：使用 FlowLayout + AST 解析
+                AdvancedLatexView(text: markdownProcessed)
+            } else {
+                // 简单模式：Markdown + LaTeX 符号替换
+                let converted = SimpleLatexConverter.convertLatexOnly(markdownProcessed)
+                Text(toMarkdown(converted))
+                    .font(.system(size: 14))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         } else {
-            // 简单模式：Markdown + LaTeX 符号替换
-            Text(SimpleLatexConverter.convertLatexOnly(markdownProcessed))
+            // 显示纯文本（流式中）
+            Text(text)
                 .font(.system(size: 14))
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    
+    // 辅助函数：将字符串转换为 AttributedString 以支持 Markdown 渲染
+    private func toMarkdown(_ text: String) -> AttributedString {
+        do {
+            var options = AttributedString.MarkdownParsingOptions()
+            options.interpretedSyntax = .inlineOnlyPreservingWhitespace // 恢复：保持行内样式，确保排版稳定
+            return try AttributedString(markdown: text, options: options)
+        } catch {
+            return AttributedString(text)
         }
     }
 }
@@ -781,7 +901,7 @@ struct SimpleLatexConverter {
         // 3. 处理 \sqrt{} -> √()
         let sqrtPattern = "\\\\sqrt\\s*\\{([^{}]*)\\}"
         if let regex = try? NSRegularExpression(pattern: sqrtPattern) {
-            for _ in 0..<5 {
+            for _ in 0..<20 {  // v1.8.5: 从 5 次增加到 20 次
                 let newResult = regex.stringByReplacingMatches(
                     in: result, range: NSRange(result.startIndex..., in: result),
                     withTemplate: "√($1)"
@@ -791,11 +911,24 @@ struct SimpleLatexConverter {
             }
         }
         
-        // 4. 处理分数 \frac{a}{b} -> (a)/(b)
+        // 4. 处理 \boxed{} -> ⟦内容⟧ (用双方括号标注答案)
+        let boxedPattern = "\\\\boxed\\s*\\{([^{}]*)\\}"
+        if let regex = try? NSRegularExpression(pattern: boxedPattern) {
+            for _ in 0..<20 {
+                let newResult = regex.stringByReplacingMatches(
+                    in: result, range: NSRange(result.startIndex..., in: result),
+                    withTemplate: "⟦$1⟧"
+                )
+                if newResult == result { break }
+                result = newResult
+            }
+        }
+        
+        // 5. 处理分数 \frac{a}{b} -> (a)/(b)
         // 迭代处理以应对嵌套
         let fracPattern = "\\\\frac\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}"
         if let regex = try? NSRegularExpression(pattern: fracPattern) {
-            for _ in 0..<10 {
+            for _ in 0..<30 {  // v1.8.5: 从 10 次增加到 30 次以处理深层嵌套
                 let newResult = regex.stringByReplacingMatches(
                     in: result, range: NSRange(result.startIndex..., in: result),
                     withTemplate: "($1)/($2)"
@@ -805,7 +938,7 @@ struct SimpleLatexConverter {
             }
         }
         
-        // 5. 上划线: \bar{x} -> x̄
+        // 6. 上划线: \bar{x} -> x̄
         let barPattern = "\\\\bar\\s*\\{([^{}]*)\\}"
         if let regex = try? NSRegularExpression(pattern: barPattern) {
             result = regex.stringByReplacingMatches(
@@ -1103,6 +1236,12 @@ struct FractionView: View {
 // MARK: - 混合内容视图 (Entry Point)
 struct MixedContentView: View {
     let text: String
+    let isStreaming: Bool // v1.8.2: 流式输出标记
+    
+    init(text: String, isStreaming: Bool = false) {
+        self.text = text
+        self.isStreaming = isStreaming
+    }
     
     var body: some View {
         let parts = text.components(separatedBy: "```")
@@ -1120,10 +1259,10 @@ struct MixedContentView: View {
                      .cornerRadius(6)
                      .frame(maxWidth: .infinity, alignment: .leading)
                  } else {
-                     // 普通文本 (支持公式)
+                     // v1.8.2: 普通文本 (支持公式)，传递流式标志
                      let part = parts[i]
                      if !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                         MessageContentView(text: part)
+                         MessageContentView(text: part, isStreaming: isStreaming)
                      }
                  }
              }

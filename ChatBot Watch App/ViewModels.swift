@@ -15,7 +15,27 @@ class ChatViewModel: ObservableObject {
     @AppStorage("customSystemPrompt") var customSystemPrompt: String = ""  // 自定义系统提示词
     @AppStorage("temperature") var temperature: Double = 0.7  // 温度参数 (0.0-2.0)
     @AppStorage("latexRenderingEnabled") var latexRenderingEnabled: Bool = true  // 启用 LaTeX 数学格式渲染
-    @AppStorage("advancedLatexEnabled") var advancedLatexEnabled: Bool = false  // 高级渲染模式（可能导致排版问题）
+    @AppStorage("markdownRenderMode") var markdownRenderModeRaw: String = MarkdownRenderMode.realtime.rawValue  // v1.8.6: Markdown 渲染模式
+    @AppStorage("advancedLatexEnabled") var advancedLatexEnabled: Bool = false  // v1.7: 启用高级 LaTeX 渲染模式（可能导致排版问题）
+    @AppStorage("thinkingMode") var thinkingModeRaw: String = ThinkingMode.auto.rawValue // v1.6: 思考模式
+    
+    // v1.8.6: 渲染模式计算属性
+    var markdownRenderMode: MarkdownRenderMode {
+        get { MarkdownRenderMode(rawValue: markdownRenderModeRaw) ?? .realtime }
+        set { markdownRenderModeRaw = newValue.rawValue }
+    }
+    
+    // v1.7: 模型能力配置 (JSON 存储)
+    @AppStorage("modelSettings") var modelSettingsData: Data = Data()
+    @Published var modelSettings: [String: ModelSettings] = [:] {
+        didSet { saveModelSettings() }
+    }
+    
+    var thinkingMode: ThinkingMode {
+        get { ThinkingMode(rawValue: thinkingModeRaw) ?? .auto }
+        set { thinkingModeRaw = newValue.rawValue }
+    }
+    
     @Published var providers: [ProviderConfig] = []
     @Published var sessions: [ChatSession] = []
     @Published var currentSessionId: UUID?
@@ -148,6 +168,8 @@ class ChatViewModel: ObservableObject {
         // 启动定位以备用
         LocationService.shared.requestPermission()
         LocationService.shared.updateLocation()
+        
+        loadModelSettings() // v1.7: 加载模型能力配置
     }
     
     deinit {
@@ -176,7 +198,7 @@ class ChatViewModel: ObservableObject {
         if let current = currentSessionId, idsToDelete.contains(current) { if let first = sessions.first { currentSessionId = first.id } else { createNewSession() } }
         saveSessions()
     }
-    private func saveSessions() {
+    func saveSessions() {
         if let encoded = try? JSONEncoder().encode(sessions) {
             UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
             
@@ -440,13 +462,21 @@ class ChatViewModel: ObservableObject {
         
         if currentSessionId == nil { createNewSession() }
         var msgs = currentMessages
-        let userMsg = ChatMessage(role: .user, text: inputText, imageData: selectedImageData)
+        
+        // v1.5: 记录发送时间
+        let sendTime = Date()
+        var userMsg = ChatMessage(role: .user, text: inputText, imageData: selectedImageData)
+        userMsg.sendTime = sendTime
         msgs.append(userMsg)
         updateCurrentSessionMessages(msgs)
         
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
         if enableHapticFeedback { WKInterfaceDevice.current().play(.click) } // 开始生成震动
-        msgs.append(ChatMessage(role: .assistant, text: ""))
+        
+        // v1.5: AI 消息也记录发送时间
+        var assistantMsg = ChatMessage(role: .assistant, text: "")
+        assistantMsg.sendTime = sendTime
+        msgs.append(assistantMsg)
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
@@ -455,45 +485,130 @@ class ChatViewModel: ObservableObject {
 
             var responseText = ""
             var thinkingText = ""
+            
+            // v1.8.1: 流式解析状态机 (优化性能)
+            var isThinking = false
+            var pendingBuffer = ""
+            
+            // v1.8.6: 最佳性能平衡 - 500ms 节流
+            var lastUIUpdateTime = Date()
+            let uiUpdateInterval: TimeInterval = 0.5  // 500ms 平衡流畅度和性能
+            var pendingUpdate = false
+            
             do {
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     // 检查是否被取消
                     if Task.isCancelled { break }
                     
-                    // 解析思考内容（使用 🧠THINK: 前缀标记）
-                    var remainingChunk = chunk
-                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
-                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
-                        if !beforeThink.isEmpty {
-                            responseText += beforeThink
-                        }
-                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
-                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
-                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
-                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
+                    // 1. 处理内部标记 (保留兼容性)
+                    var processedChunk = chunk
+                    if let range = processedChunk.range(of: "🧠THINK:") {
+                         processedChunk = processedChunk.replacingOccurrences(of: "🧠THINK:", with: "")
+                    }
+                    
+                    // 2. 追加到缓冲
+                    pendingBuffer += processedChunk
+                    
+                    // 3. 状态机解析循环
+                    while true {
+                        let tag = isThinking ? "</think>" : "<think>"
+                        if let range = pendingBuffer.range(of: tag, options: .caseInsensitive) {
+                            // 找到标签
+                            let contentBefore = String(pendingBuffer[..<range.lowerBound])
+                            
+                            if isThinking {
+                                thinkingText += contentBefore
+                                isThinking = false // 结束思考
+                            } else {
+                                responseText += contentBefore
+                                isThinking = true // 开始思考
+                            }
+                            
+                            // 移除已处理部分（包括标签）
+                            pendingBuffer = String(pendingBuffer[range.upperBound...])
+                            // 继续循环检查剩余 buffer 是否有下一个标签
                         } else {
-                            thinkingText += remainingChunk
-                            remainingChunk = ""
+                            // 未找到完整标签，处理安全部分
+                            let keepLength = tag.count - 1
+                            if pendingBuffer.count > keepLength {
+                                let safeIndex = pendingBuffer.index(pendingBuffer.endIndex, offsetBy: -keepLength)
+                                let safeContent = String(pendingBuffer[..<safeIndex])
+                                
+                                if isThinking {
+                                    thinkingText += safeContent
+                                } else {
+                                    responseText += safeContent
+                                }
+                                
+                                // 保留可能构成标签的后缀
+                                pendingBuffer = String(pendingBuffer[safeIndex...])
+                            }
+                            break // 退出内层循环，等待下一个 Chunk
                         }
                     }
-                    if !remainingChunk.isEmpty {
-                        responseText += remainingChunk
-                    }
                     
-                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
-                    let finalThinking = thinkingText + (parsedThinking ?? "")
-                    let finalContent = parsedContent
-                    
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        currentMsgs[botIndex].text = finalContent
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        updateCurrentSessionMessagesInMemory(currentMsgs) // 流式输出时仅更新内存
+                    // v1.8.6: 恢复流畅的流式更新 - 500ms 节流 + 实时 Markdown
+                    let now = Date()
+                    if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
+                        let finalThinking = thinkingText
+                        var finalContent = responseText
+                        finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
                         
-                        // 轻微触觉反馈 (每收到一部分内容震动太频繁，这里可以不加，或者仅在思考结束时加)
-                        // WKInterfaceDevice.current().play(.click)
+                        // 不使用动画，减少开销
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].text = finalContent
+                            
+                            if thinkingMode == .disabled {
+                                currentMsgs[botIndex].thinkingContent = nil
+                            } else {
+                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                            }
+                            
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        }
+                        lastUIUpdateTime = now
+                        pendingUpdate = false
+                    } else {
+                        pendingUpdate = true
                     }
                 }
+                
+                // 循环结束，处理剩余 Buffer
+                if !pendingBuffer.isEmpty {
+                    if isThinking {
+                         thinkingText += pendingBuffer
+                    } else {
+                         responseText += pendingBuffer
+                    }
+                }
+                
+                // v1.8.2: 完成时才加动画，提升体验
+                if true { // 强制执行一次
+                     let finalThinking = thinkingText
+                     var finalContent = responseText
+                     finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].text = finalContent
+                            
+                            if thinkingMode == .disabled {
+                                currentMsgs[botIndex].thinkingContent = nil
+                            } else {
+                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                            }
+                            
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        }
+                    }
+                }
+                
+                // v1.8.4: 流式输出完成
+                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
+                }
+                
                 // 流式输出完成后，一次性保存到磁盘
                 saveSessions()
                 // 生成完成：成功震动
@@ -686,6 +801,126 @@ class ChatViewModel: ObservableObject {
     @Published var editingMessageID: UUID?
     @Published var editingText: String = ""
     
+    // MARK: - 模型能力检查 (v1.7)
+    
+    enum ThinkingSupportStatus {
+        case supported      // 原生支持 (e.g. DeepSeek-R1)
+        case unsupported    // 原生不支持 (e.g. GPT-3.5)
+        case unknown        // 未知 / 无法判断
+    }
+    
+    /// 获取当前模型的思考能力状态
+    /// 优先级：模型专属设置 > 全局思考模式 > 自动判断
+    func checkThinkingSupport(modelId: String = "") -> ThinkingSupportStatus {
+        let targetId = modelId.isEmpty ? resolveCurrentModelID() : modelId
+        let lower = targetId.lowercased()
+        
+        // 1. 检查模型专属设置
+        if let settings = modelSettings[targetId] {
+            switch settings.thinking {
+            case .enabled: return .supported
+            case .disabled: return .unsupported
+            case .auto: break // 继续检查
+            }
+        }
+        
+        // 2. 检查全局模式
+        // 注意：全局模式控制的是“是否显示”，这里返回的是“是否支持”
+        // 如果全局强制开启，则视为支持；强制关闭不影响支持状态判断，但会影响显示逻辑
+        if thinkingMode == .enabled { return .supported }
+        
+        // 3. 查表逻辑 (ModelRegistry)
+        if let info = ModelRegistry.shared.getCapability(modelId: targetId) {
+            if info.supportsThinking { return .supported }
+        }
+        
+        // 4. 兜底/旧逻辑
+        if lower.contains("deepseek-r1") || 
+           lower.contains("deepseek-reasoner") {
+            return .supported
+        }
+        
+        // 已知不支持列表
+        if lower.contains("gpt-3") || 
+           lower.contains("gpt-4") || 
+           lower.contains("claude-3") || 
+           lower.contains("gemini") ||
+           lower.contains("deepseek-chat") || // V3 非 R1
+           lower.contains("deepseek-v3") {
+            return .unsupported
+        }
+        
+        return .unknown
+    }
+    
+    /// 获取当前模型的视觉能力状态
+    /// 优先级：模型专属设置 > 自动判断
+    func checkVisionSupport(modelId: String = "") -> ThinkingSupportStatus {
+        let targetId = modelId.isEmpty ? resolveCurrentModelID() : modelId
+        let lower = targetId.lowercased()
+        
+        // 1. 检查模型专属设置
+        if let settings = modelSettings[targetId] {
+            switch settings.vision {
+            case .enabled: return .supported
+            case .disabled: return .unsupported
+            case .auto: break 
+            }
+        }
+        
+        // 2. 查表逻辑 (ModelRegistry)
+        if let info = ModelRegistry.shared.getCapability(modelId: targetId) {
+            if info.supportsVision { return .supported }
+        }
+        
+        // 3. 兜底逻辑
+        if lower.contains("vision") || 
+           lower.contains("gpt-4o") || 
+           lower.contains("gemini-1.5") || 
+           lower.contains("claude-3") ||
+           lower.contains("vl") { // Qwen-VL, DeepSeek-VL
+            return .supported
+        }
+        
+        if lower.contains("gpt-3") || 
+           lower.contains("deepseek-r1") { // R1 目前主要是文本
+            return .unsupported
+        }
+        
+        return .unknown
+    }
+    
+    /// 解析当前选中的模型 ID (去除 Provider 前缀)
+    func resolveCurrentModelID() -> String {
+        let components = selectedGlobalModelID.split(separator: "|")
+        if components.count >= 2 {
+            return String(components[1])
+        }
+        return selectedGlobalModelID
+    }
+    
+    // 保存模型设置
+    func saveModelSettings() {
+        if let data = try? JSONEncoder().encode(modelSettings) {
+            modelSettingsData = data
+        }
+    }
+    
+    // 加载模型设置 (在 init 中调用)
+    func loadModelSettings() {
+        if let decoded = try? JSONDecoder().decode([String: ModelSettings].self, from: modelSettingsData) {
+            modelSettings = decoded
+        }
+    }
+    
+    // 更新特定模型的能力设置
+    func updateModelSettings(modelId: String, thinking: CapabilityState? = nil, vision: CapabilityState? = nil) {
+        var settings = modelSettings[modelId] ?? ModelSettings()
+        if let t = thinking { settings.thinking = t }
+        if let v = vision { settings.vision = v }
+        modelSettings[modelId] = settings
+    }
+    
     func startEditing(message: ChatMessage) {
         stopGeneration() // 假如正在生成，先停止
         editingMessageID = message.id
@@ -724,7 +959,12 @@ class ChatViewModel: ObservableObject {
               !provider.apiKey.isEmpty else { return }
         
         isLoading = true
-        msgs.append(ChatMessage(role: .assistant, text: ""))
+        // v1.8: 记录重新生成的时间
+        let sendTime = Date()
+        var assistantMsg = ChatMessage(role: .assistant, text: "")
+        assistantMsg.sendTime = sendTime
+        msgs.append(assistantMsg)
+        
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
@@ -732,48 +972,137 @@ class ChatViewModel: ObservableObject {
             let history = buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
+            var firstTokenReceived = false
+            var localFirstTokenTime: Date? = nil // v1.8: 本地暂存首 Token 时间
+            
+            // v1.8.1: 流式解析状态机 (优化性能)
+            var isThinking = false
+            var pendingBuffer = ""
+            
+            // v1.8.3: 终极性能权衡 - 3秒更新 + 实时Markdown
+            var lastUIUpdateTime = Date()
+            let uiUpdateInterval: TimeInterval = 3.0
+            var pendingUpdate = false
+            
             do {
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     if Task.isCancelled { break }
                     
-                    var remainingChunk = chunk
-                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
-                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
-                        if !beforeThink.isEmpty { responseText += beforeThink }
-                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
-                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
-                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
-                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
-                        } else {
-                            thinkingText += remainingChunk
-                            remainingChunk = ""
+                    // v1.8: 记录首 Token 时间
+                    if !firstTokenReceived {
+                        firstTokenReceived = true
+                        localFirstTokenTime = Date()
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].firstTokenTime = localFirstTokenTime
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
                         }
                     }
-                    if !remainingChunk.isEmpty { responseText += remainingChunk }
+                    // 1. 处理内部标记 (保留兼容性)
+                    var processedChunk = chunk
+                    if let range = processedChunk.range(of: "🧠THINK:") {
+                         processedChunk = processedChunk.replacingOccurrences(of: "🧠THINK:", with: "")
+                    }
                     
-                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
-                    let finalThinking = thinkingText + (parsedThinking ?? "")
-                    let finalContent = parsedContent
+                    // 2. 追加到缓冲
+                    pendingBuffer += processedChunk
+                    
+                    // 3. 状态机解析循环
+                    while true {
+                        let tag = isThinking ? "</think>" : "<think>"
+                        if let range = pendingBuffer.range(of: tag, options: .caseInsensitive) {
+                            let contentBefore = String(pendingBuffer[..<range.lowerBound])
+                            if isThinking {
+                                thinkingText += contentBefore
+                                isThinking = false
+                            } else {
+                                responseText += contentBefore
+                                isThinking = true
+                            }
+                            pendingBuffer = String(pendingBuffer[range.upperBound...])
+                        } else {
+                            let keepLength = tag.count - 1
+                            if pendingBuffer.count > keepLength {
+                                let safeIndex = pendingBuffer.index(pendingBuffer.endIndex, offsetBy: -keepLength)
+                                let safeContent = String(pendingBuffer[..<safeIndex])
+                                if isThinking { thinkingText += safeContent }
+                                else { responseText += safeContent }
+                                pendingBuffer = String(pendingBuffer[safeIndex...])
+                            }
+                            break
+                        }
+                    }
+                    
+                    // 4. 节流 UI 更新（流式输出时禁用动画，减少Watch卡顿）
+                    let now = Date()
+                    if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
+                        let finalThinking = thinkingText
+                        var finalContent = responseText
+                        finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        // v1.8.4: 流式输出时禁用动画，只做数据更新
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].text = finalContent
+                            if thinkingMode == .disabled {
+                                currentMsgs[botIndex].thinkingContent = nil
+                            } else {
+                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                            }
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        }
+                        lastUIUpdateTime = now
+                        pendingUpdate = false
+                    } else {
+                        pendingUpdate = true
+                    }
+                }
+                
+                // 结束处理剩余 Buffer
+                if !pendingBuffer.isEmpty {
+                    if isThinking { thinkingText += pendingBuffer }
+                    else { responseText += pendingBuffer }
+                }
+                
+                // v1.8: 完成记录
+                if true {
+                    let finalThinking = thinkingText
+                    var finalContent = responseText
+                    finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
                     
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                         currentMsgs[botIndex].text = finalContent
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        updateCurrentSessionMessages(currentMsgs)
+                        if thinkingMode == .disabled {
+                            currentMsgs[botIndex].thinkingContent = nil
+                        } else {
+                            currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                        }
+                        currentMsgs[botIndex].completeTime = Date()
+                        if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
                 }
+                
+                saveSessions() // 最终保存
+                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
+                
             } catch {
                 if Task.isCancelled {
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                         if !currentMsgs[botIndex].text.isEmpty {
                             currentMsgs[botIndex].text += "\n[已停止]"
                         }
-                        updateCurrentSessionMessages(currentMsgs)
+                        if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
+                    saveSessions()
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
                     else { currentMsgs[botIndex].text += "\n[中断]" }
-                    updateCurrentSessionMessages(currentMsgs)
+                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
+                    saveSessions()
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
                 }
             }
             isLoading = false

@@ -488,6 +488,7 @@ private struct PrivateOpenAIModel: Codable, Identifiable {
 }
 private struct PrivateOpenAIStreamResponse: Decodable {
     let choices: [PrivateStreamChoice]
+    let usage: PrivateUsage?  // v1.5: Token 统计
 }
 private struct PrivateStreamChoice: Decodable {
     let delta: PrivateStreamDelta
@@ -495,6 +496,11 @@ private struct PrivateStreamChoice: Decodable {
 private struct PrivateStreamDelta: Decodable {
     let content: String?
     let reasoning_content: String? // 智谱AI等模型的思考内容字段
+}
+private struct PrivateUsage: Decodable {
+    let prompt_tokens: Int?
+    let completion_tokens: Int?
+    let total_tokens: Int?
 }
 private struct PrivateGeminiModelListResponse: Codable {
     let models: [PrivateGeminiModelRaw]

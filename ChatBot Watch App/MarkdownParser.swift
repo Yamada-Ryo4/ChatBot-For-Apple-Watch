@@ -68,15 +68,19 @@ struct MarkdownParser {
             r = lines.joined(separator: "\n")
         }
         
-        // 标题简化 - 只移除 # 符号，不添加可见标记
-        r = r.replacingOccurrences(of: "\n#### ", with: "\n")
-        r = r.replacingOccurrences(of: "\n### ", with: "\n")
-        r = r.replacingOccurrences(of: "\n## ", with: "\n")
-        r = r.replacingOccurrences(of: "\n# ", with: "\n")
-        if r.hasPrefix("#### ") { r = String(r.dropFirst(5)) }
-        if r.hasPrefix("### ") { r = String(r.dropFirst(4)) }
-        if r.hasPrefix("## ") { r = String(r.dropFirst(3)) }
-        if r.hasPrefix("# ") { r = String(r.dropFirst(2)) }
+        // 标题简化 - 转换为加粗文本，以适应 inlineOnlyPreservingWhitespace 模式
+        // 使用正则将 # Title 替换为 **Title**
+        do {
+            // 匹配行首的 # 号 (1-6个)，忽略代码块内的 (虽然这里没法完美区分，但 cleanMarkdown 本身就是简单处理)
+            // 模式：(换行或开头)(#+空格)(内容)(换行或结尾)
+            let pattern = "(\\n|^)(#+\\s)(.*?)(\\n|$)"
+            let regex = try NSRegularExpression(pattern: pattern, options: [])
+            let range = NSRange(location: 0, length: (r as NSString).length)
+            // 替换为：$1**$3**$4
+            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "$1**$3**$4")
+        } catch {
+            print("Regex error: \(error)")
+        }
         
         // 列表符号
         r = r.replacingOccurrences(of: "\n- [ ] ", with: "\n☐ ")
@@ -84,21 +88,43 @@ struct MarkdownParser {
         r = r.replacingOccurrences(of: "\n- [X] ", with: "\n☑ ")
         r = r.replacingOccurrences(of: "\n- ", with: "\n- ")
         r = r.replacingOccurrences(of: "\n* ", with: "\n- ")
-        r = r.replacingOccurrences(of: "\n> ", with: "\n| ")
+        // 引用块优化：使用竖线符号 + 斜体模拟引用样式
+        // r = r.replacingOccurrences(of: "\n> ", with: "\n| ") // 旧逻辑
+        do {
+            // 匹配行首的 > (可能带空格)
+            let pattern = "(\\n|^)(>\\s?)(.*?)(\\n|$)"
+            let regex = try NSRegularExpression(pattern: pattern, options: [])
+            let range = NSRange(location: 0, length: (r as NSString).length)
+            // 替换为：$1▍ $3$4 (使用更粗的竖线 + 空格，不使用斜体以保持清晰)
+            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "$1▍ $3$4")
+        } catch {
+            print("Regex error (quote): \(error)")
+        }
         
-        // 分割线
-        r = r.replacingOccurrences(of: "\n---\n", with: "\n")
-        r = r.replacingOccurrences(of: "\n***\n", with: "\n")
+        // 分割线：转换为文本型分割线，避免 AttributedString 解析为 Block 导致排版混乱
+        r = r.replacingOccurrences(of: "\n---\n", with: "\n──────────\n")
+        r = r.replacingOccurrences(of: "\n***\n", with: "\n──────────\n")
         
         // 行内格式 (简单移除标记)
-        // 注意：如果我们想要 MessageContentView 支持加粗，这里不应该移除 **。
-        // 但 MarkdownParser.format 还是返回 String 给 Text 用。
-        // 为了兼容旧逻辑，我们必须移除。
-        // 为了新逻辑... 我们可能需要一个可选参数？
-        // 暂时保持原样，因为 MessageContentView 现在使用 splitText 按空格分，markdown 也不太好支持。
-        r = r.replacingOccurrences(of: "**", with: "")
-        r = r.replacingOccurrences(of: "~~", with: "")
-        r = r.replacingOccurrences(of: "`", with: "") 
+        // 注意：SwiftUI Text 支持部分 Markdown，保留这些符号以进行渲染
+        // r = r.replacingOccurrences(of: "**", with: "")
+        // r = r.replacingOccurrences(of: "~~", with: "")
+        // r = r.replacingOccurrences(of: "`", with: "") 
+        
+        // v1.8.2: 处理 HTML 标签 (details/summary)
+        r = r.replacingOccurrences(of: "<details>", with: "", options: .caseInsensitive)
+        r = r.replacingOccurrences(of: "</details>", with: "", options: .caseInsensitive)
+        r = r.replacingOccurrences(of: "</summary>", with: "\n", options: .caseInsensitive)
+        
+        // <summary>文本</summary> -> ▼ 文本
+        do {
+            let pattern = "<summary>(.*?)"
+            let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+            let range = NSRange(location: 0, length: (r as NSString).length)
+            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "▼ $1")
+        } catch {
+            print("Regex error (summary): \(error)")
+        }
         
         return r
     }

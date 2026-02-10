@@ -82,7 +82,29 @@ struct SettingsView: View {
                 }
             }
             
-            Section(header: Text("数学公式渲染")) {
+            
+            Section(header: Text("文本渲染")) {
+                Picker("Markdown 渲染模式", selection: $viewModel.markdownRenderMode) {
+                    ForEach(MarkdownRenderMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                
+                switch viewModel.markdownRenderMode {
+                case .realtime:
+                    Text("流式时实时渲染，可能影响性能")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                case .onComplete:
+                    Text("完成后自动渲染，流畅且自动格式化")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                case .manual:
+                    Text("流式显示纯文本，点击按钮手动渲染")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                
                 Toggle("启用 LaTeX 渲染", isOn: $viewModel.latexRenderingEnabled)
                 
                 if viewModel.latexRenderingEnabled {
@@ -102,6 +124,30 @@ struct SettingsView: View {
                         let val = Double(i) / 10.0
                         Text(String(format: "%.1f", val)).tag(val)
                     }
+                }
+                
+                // v1.6: 思考模式设置
+                Picker("思考模式", selection: $viewModel.thinkingMode) {
+                    ForEach(ThinkingMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                
+                // 思考模式支持提示
+                let supportStatus = viewModel.checkThinkingSupport()
+                switch supportStatus {
+                case .supported:
+                    Text("✅ 当前模型原生支持思考模式")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                case .unsupported:
+                    Text("⚠️ 当前模型可能不支持思考模式")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                case .unknown:
+                    Text("❓ 无法判断支持情况，可尝试手动开启")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
                 
                 NavigationLink {
@@ -194,6 +240,9 @@ struct ProviderDetailView: View {
     //引入本地临时状态，防止输入过程中触发父视图刷新导致键盘断连
     @State private var draftConfig: ProviderConfig = ProviderConfig(name: "", baseURL: "", apiKey: "", isPreset: false, icon: "")
     
+    // v1.7: 用于配置能力的模型
+    @State private var modelToConfigure: AIModelInfo?
+    
     var body: some View {
         Form {
             Section(header: Text("连接信息")) {
@@ -265,22 +314,54 @@ struct ProviderDetailView: View {
                     TextField("搜索模型...", text: $modelSearchText)
                         .textInputAutocapitalization(.never)
                     
+                    // 排序逻辑：收藏的排在前面，然后按 ID 排序
                     let displayModels = mergeModels().filter { model in
                         modelSearchText.isEmpty ||
                         model.id.localizedCaseInsensitiveContains(modelSearchText) ||
                         (model.displayName?.localizedCaseInsensitiveContains(modelSearchText) ?? false)
+                    }.sorted { m1, m2 in
+                        let isFav1 = draftConfig.isModelFavorited(m1.id)
+                        let isFav2 = draftConfig.isModelFavorited(m2.id)
+                        if isFav1 != isFav2 { return isFav1 } // 收藏优先
+                        return m1.id < m2.id
                     }
+                    
                     ForEach(displayModels) { model in
+                        // 构建组合 ID 用于检查设置
+                        let compositeID = "\(draftConfig.id.uuidString)|\(model.id)"
+                        let settings = viewModel.modelSettings[compositeID] ?? ModelSettings()
+                        
                         Button { toggleDraftModelFavorite(model: model) } label: {
                             HStack {
                                 VStack(alignment: .leading) {
-                                    Text(model.id).font(.caption)
+                                    HStack {
+                                        Text(model.id).font(.caption)
+                                        // 显示能力状态图标
+                                        if viewModel.checkThinkingSupport(modelId: compositeID) == .supported {
+                                            Image(systemName: "lightbulb.fill")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.yellow)
+                                        }
+                                        if viewModel.checkVisionSupport(modelId: compositeID) == .supported {
+                                            Image(systemName: "eye.fill")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.green)
+                                        }
+                                    }
                                     if let display = model.displayName { Text(display).font(.caption2).foregroundColor(.blue) }
                                 }
                                 Spacer()
                                 if draftConfig.isModelFavorited(model.id) { Image(systemName: "star.fill").foregroundColor(.yellow) }
                                 else { Image(systemName: "star").foregroundColor(.gray) }
                             }
+                        }
+                        .swipeActions(edge: .trailing) { // 左滑
+                            Button {
+                                self.modelToConfigure = model
+                            } label: {
+                                Label("能力配置", systemImage: "slider.horizontal.3")
+                            }
+                            .tint(.orange)
                         }
                     }
                 }
@@ -295,6 +376,11 @@ struct ProviderDetailView: View {
             // 退出页面时将修改同步回 ViewModel
             self.config = draftConfig
             viewModel.saveProviders()
+        }
+        .sheet(item: $modelToConfigure) { model in
+            let compositeID = "\(draftConfig.id.uuidString)|\(model.id)"
+            let settings = viewModel.modelSettings[compositeID] ?? ModelSettings()
+            ModelCapabilityConfigView(viewModel: viewModel, modelID: compositeID, settings: settings)
         }
     }
     
@@ -335,6 +421,15 @@ struct ProviderDetailView: View {
                     self.isFetching = false 
                 }
             }
+        }
+    }
+    
+    // 切换能力状态: 自动 -> 开启 -> 关闭 -> 自动
+    func nextCapabilityState(_ current: CapabilityState) -> CapabilityState {
+        switch current {
+        case .auto: return .enabled
+        case .enabled: return .disabled
+        case .disabled: return .auto
         }
     }
 }
@@ -656,5 +751,51 @@ struct SystemPromptEditView: View {
         .onAppear {
             draftPrompt = prompt
         }
+    }
+}
+
+
+// MARK: - 模型能力配置视图 (v1.7)
+struct ModelCapabilityConfigView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let modelID: String
+    @State var settings: ModelSettings
+    
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        Form {
+            Section(header: Text("模型 ID")) {
+                Text(modelID)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Section(header: Text("思考能力 (Thinking)"), footer: Text("强制开启可能会让不支持思考的模型产生幻觉或乱码。")) {
+                Picker("状态", selection: $settings.thinking) {
+                    ForEach(CapabilityState.allCases) { state in
+                        Text(state.rawValue).tag(state)
+                    }
+                }
+                .onChange(of: settings.thinking) { _ in save() }
+            }
+            
+            Section(header: Text("视觉能力 (Vision)"), footer: Text("开启后允许上传图片。如果模型不支持视觉，图片将被忽略或导致报错。")) {
+                Picker("状态", selection: $settings.vision) {
+                    ForEach(CapabilityState.allCases) { state in
+                        Text(state.rawValue).tag(state)
+                    }
+                }
+                .onChange(of: settings.vision) { _ in save() }
+            }
+        }
+        .navigationTitle("能力配置")
+        .onDisappear {
+            save()
+        }
+    }
+    
+    func save() {
+        viewModel.updateModelSettings(modelId: modelID, thinking: settings.thinking, vision: settings.vision)
     }
 }
