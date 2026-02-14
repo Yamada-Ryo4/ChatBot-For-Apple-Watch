@@ -18,6 +18,14 @@ class ChatViewModel: ObservableObject {
     @AppStorage("markdownRenderMode") var markdownRenderModeRaw: String = MarkdownRenderMode.realtime.rawValue  // v1.8.6: Markdown 渲染模式
     @AppStorage("advancedLatexEnabled") var advancedLatexEnabled: Bool = false  // v1.7: 启用高级 LaTeX 渲染模式（可能导致排版问题）
     @AppStorage("thinkingMode") var thinkingModeRaw: String = ThinkingMode.auto.rawValue // v1.6: 思考模式
+    @AppStorage("enableMessageAnimation") var enableMessageAnimation: Bool = true  // v1.6: 消息气泡动画
+    @AppStorage("appThemeRaw") var appThemeRaw: String = AppTheme.classic.rawValue  // v1.6: 主题配色
+    
+    // v1.6: 主题计算属性
+    var currentTheme: AppTheme {
+        get { AppTheme(rawValue: appThemeRaw) ?? .classic }
+        set { appThemeRaw = newValue.rawValue }
+    }
     
     // v1.8.6: 渲染模式计算属性
     var markdownRenderMode: MarkdownRenderMode {
@@ -41,6 +49,8 @@ class ChatViewModel: ObservableObject {
     @Published var currentSessionId: UUID?
     @Published var inputText: String = ""
     @Published var isLoading: Bool = false
+    @Published var streamingText: String = ""          // v1.6: 流式输出专用（避免全量重渲染）
+    @Published var streamingThinkingText: String = ""   // v1.6: 流式思考内容
     @Published var isInputVisible: Bool = true  // 输入框是否可见（用于显示回到底部按钮）
     @Published var selectedImageItem: PhotosPickerItem? = nil
     @Published var selectedImageData: Data? = nil
@@ -52,6 +62,9 @@ class ChatViewModel: ObservableObject {
         currentTask?.cancel()
         currentTask = nil
         isLoading = false
+        // v1.6: 清空流式状态
+        streamingText = ""
+        streamingThinkingText = ""
     }
     init() {
         // 预设版本号 - 更新时会智能合并，不会丢失用户数据
@@ -473,6 +486,10 @@ class ChatViewModel: ObservableObject {
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
         if enableHapticFeedback { WKInterfaceDevice.current().play(.click) } // 开始生成震动
         
+        // v1.6: 初始化流式输出状态
+        streamingText = ""
+        streamingThinkingText = ""
+        
         // v1.5: AI 消息也记录发送时间
         var assistantMsg = ChatMessage(role: .assistant, text: "")
         assistantMsg.sendTime = sendTime
@@ -490,9 +507,9 @@ class ChatViewModel: ObservableObject {
             var isThinking = false
             var pendingBuffer = ""
             
-            // v1.8.6: 最佳性能平衡 - 500ms 节流
+            // v1.6: 性能优化 - 200ms 节流（只更新 streamingText，不触发全量 diff）
             var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 0.5  // 500ms 平衡流畅度和性能
+            let uiUpdateInterval: TimeInterval = 0.15  // 150ms 平衡流畅度和性能
             var pendingUpdate = false
             
             do {
@@ -548,24 +565,13 @@ class ChatViewModel: ObservableObject {
                         }
                     }
                     
-                    // v1.8.6: 恢复流畅的流式更新 - 500ms 节流 + 实时 Markdown
+                    // v1.6: 高性能流式更新 — 只更新 streamingText，不碰 sessions
                     let now = Date()
                     if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
-                        let finalThinking = thinkingText
-                        var finalContent = responseText
-                        finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
-                        
-                        // 不使用动画，减少开销
-                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                            currentMsgs[botIndex].text = finalContent
-                            
-                            if thinkingMode == .disabled {
-                                currentMsgs[botIndex].thinkingContent = nil
-                            } else {
-                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                            }
-                            
-                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        streamingText = finalContent
+                        if thinkingMode != .disabled {
+                            streamingThinkingText = thinkingText
                         }
                         lastUIUpdateTime = now
                         pendingUpdate = false
@@ -583,30 +589,25 @@ class ChatViewModel: ObservableObject {
                     }
                 }
                 
-                // v1.8.2: 完成时才加动画，提升体验
-                if true { // 强制执行一次
-                     let finalThinking = thinkingText
-                     var finalContent = responseText
-                     finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                // v1.6: 流式完成 — 一次性写入 sessions（触发完整 Markdown 渲染）
+                do {
+                    let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let finalThinking = thinkingText
                     
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                            currentMsgs[botIndex].text = finalContent
-                            
-                            if thinkingMode == .disabled {
-                                currentMsgs[botIndex].thinkingContent = nil
-                            } else {
-                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                            }
-                            
-                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        currentMsgs[botIndex].text = finalContent
+                        
+                        if thinkingMode == .disabled {
+                            currentMsgs[botIndex].thinkingContent = nil
+                        } else {
+                            currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
                         }
+                        
+                        // 先清空流式状态，再写入 sessions
+                        streamingText = ""
+                        streamingThinkingText = ""
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
-                }
-                
-                // v1.8.4: 流式输出完成
-                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
                 }
                 
                 // 流式输出完成后，一次性保存到磁盘
@@ -614,23 +615,32 @@ class ChatViewModel: ObservableObject {
                 // 生成完成：成功震动
                 if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
             } catch {
+                // v1.6: 先清空流式状态
+                streamingText = ""
+                streamingThinkingText = ""
+                
                 // 如果是取消错误，标记为用户停止
                 if Task.isCancelled {
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        if !currentMsgs[botIndex].text.isEmpty {
-                            currentMsgs[botIndex].text += "\n[已停止]"
+                        // 写入已积累的文本
+                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
+                        if thinkingMode != .disabled && !thinkingText.isEmpty {
+                            currentMsgs[botIndex].thinkingContent = thinkingText
                         }
                         updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
-                    saveSessions() // 停止后保存
-                    // 停止震动 (使用 click 或 directionDown)
+                    saveSessions()
                     if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
-                    else { currentMsgs[botIndex].text += "\n[中断]" }
+                    let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
+                    else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
+                    if thinkingMode != .disabled && !thinkingText.isEmpty {
+                        currentMsgs[botIndex].thinkingContent = thinkingText
+                    }
                     updateCurrentSessionMessagesInMemory(currentMsgs)
-                    saveSessions() // 错误后保存
-                    // 错误震动
+                    saveSessions()
                     if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
                 }
             }
@@ -725,14 +735,24 @@ class ChatViewModel: ObservableObject {
         
         updateCurrentSessionMessages(msgs)
         isLoading = true
+        
+        // v1.6: 初始化流式输出状态
+        streamingText = ""
+        streamingThinkingText = ""
+        
         msgs.append(ChatMessage(role: .assistant, text: ""))
-        updateCurrentSessionMessages(msgs)
+        updateCurrentSessionMessagesInMemory(msgs) // 只更新内存，不写磁盘
         let botIndex = msgs.count - 1
         
         currentTask = Task {
             let history = buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
+            
+            // v1.6: 200ms 节流（只更新 streamingText）
+            var lastUIUpdateTime = Date()
+            let uiUpdateInterval: TimeInterval = 0.15  // 150ms 平衡流畅度和性能
+            
             do {
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
@@ -755,26 +775,50 @@ class ChatViewModel: ObservableObject {
                     
                     let (parsedThinking, parsedContent) = parseThinkTags(responseText)
                     let finalThinking = thinkingText + (parsedThinking ?? "")
-                    let finalContent = parsedContent
+                    responseText = parsedContent // 更新解析后的内容
+                    thinkingText = finalThinking
                     
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        currentMsgs[botIndex].text = finalContent
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        updateCurrentSessionMessages(currentMsgs)
+                    // v1.6: 节流更新 streamingText
+                    let now = Date()
+                    if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
+                        streamingText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !thinkingText.isEmpty {
+                            streamingThinkingText = thinkingText
+                        }
+                        lastUIUpdateTime = now
                     }
                 }
+                
+                // 流式完成 — 一次性写入 sessions
+                let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    currentMsgs[botIndex].text = finalContent
+                    currentMsgs[botIndex].thinkingContent = thinkingText.isEmpty ? nil : thinkingText
+                    streamingText = ""
+                    streamingThinkingText = ""
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
+                }
+                saveSessions()
+                
             } catch {
+                streamingText = ""
+                streamingThinkingText = ""
+                
                 if Task.isCancelled {
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        if !currentMsgs[botIndex].text.isEmpty {
-                            currentMsgs[botIndex].text += "\n[已停止]"
-                        }
-                        updateCurrentSessionMessages(currentMsgs)
+                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
+                        if !thinkingText.isEmpty { currentMsgs[botIndex].thinkingContent = thinkingText }
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
+                    saveSessions()
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
-                    else { currentMsgs[botIndex].text += "\n[中断]" }
-                    updateCurrentSessionMessages(currentMsgs)
+                    let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
+                    else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
+                    if !thinkingText.isEmpty { currentMsgs[botIndex].thinkingContent = thinkingText }
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
+                    saveSessions()
                 }
             }
             isLoading = false

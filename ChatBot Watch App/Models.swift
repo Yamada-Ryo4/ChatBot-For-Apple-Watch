@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 // MARK: - 基础枚举
 
@@ -58,6 +59,48 @@ enum MarkdownRenderMode: String, Codable, CaseIterable, Identifiable {
     case manual = "手动渲染"           // 仅手动触发渲染
     
     var id: String { rawValue }
+}
+
+// v1.6: 主题配色
+enum AppTheme: String, Codable, CaseIterable, Identifiable {
+    case classic = "经典"     // 绿色用户 + 灰色AI
+    case ocean   = "海洋"     // 蓝色用户 + 深蓝AI
+    case purple  = "紫韵"     // 紫色用户 + 深紫AI
+    case sunset  = "日落"     // 橙色用户 + 暖灰AI
+    
+    var id: String { rawValue }
+    
+    var userBubbleColor: Color {
+        switch self {
+        case .classic: return Color.green
+        case .ocean:   return Color(red: 0.2, green: 0.5, blue: 0.9)
+        case .purple:  return Color(red: 0.6, green: 0.3, blue: 0.85)
+        case .sunset:  return Color(red: 0.95, green: 0.5, blue: 0.2)
+        }
+    }
+    
+    var botBubbleColor: Color {
+        switch self {
+        case .classic: return Color.gray.opacity(0.3)
+        case .ocean:   return Color(red: 0.12, green: 0.2, blue: 0.35)
+        case .purple:  return Color(red: 0.2, green: 0.15, blue: 0.3)
+        case .sunset:  return Color(red: 0.25, green: 0.2, blue: 0.18)
+        }
+    }
+    
+    var accentColor: Color {
+        switch self {
+        case .classic: return Color.blue
+        case .ocean:   return Color(red: 0.3, green: 0.7, blue: 1.0)
+        case .purple:  return Color(red: 0.75, green: 0.5, blue: 1.0)
+        case .sunset:  return Color(red: 1.0, green: 0.6, blue: 0.3)
+        }
+    }
+    
+    // 用于设置页颜色预览的小圆点
+    var previewColors: [Color] {
+        [userBubbleColor, botBubbleColor]
+    }
 }
 
 struct ChatSession: Identifiable, Codable, Hashable, Sendable {

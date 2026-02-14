@@ -75,9 +75,22 @@ struct SettingsView: View {
                 Toggle("显示模型名称", isOn: $viewModel.showModelNameInNavBar)
                 Toggle("显示回底部按钮", isOn: $viewModel.showScrollToBottomButton)
                 Toggle("启用振动反馈", isOn: $viewModel.enableHapticFeedback)
+                Toggle("消息气泡动画", isOn: $viewModel.enableMessageAnimation)
                 Picker("对话历史上下文", selection: $viewModel.historyMessageCount) {
                     ForEach(Array(stride(from: 5, through: 50, by: 5)), id: \.self) { count in
                         Text("\(count)条").tag(count)
+                    }
+                }
+                
+                // v1.6: 主题选择
+                Picker("主题配色", selection: $viewModel.currentTheme) {
+                    ForEach(AppTheme.allCases) { theme in
+                        HStack(spacing: 6) {
+                            Circle().fill(theme.userBubbleColor).frame(width: 10, height: 10)
+                            Circle().fill(theme.botBubbleColor).frame(width: 10, height: 10)
+                            Text(theme.rawValue)
+                        }
+                        .tag(theme)
                     }
                 }
             }
@@ -126,30 +139,6 @@ struct SettingsView: View {
                     }
                 }
                 
-                // v1.6: 思考模式设置
-                Picker("思考模式", selection: $viewModel.thinkingMode) {
-                    ForEach(ThinkingMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                
-                // 思考模式支持提示
-                let supportStatus = viewModel.checkThinkingSupport()
-                switch supportStatus {
-                case .supported:
-                    Text("✅ 当前模型原生支持思考模式")
-                        .font(.caption2)
-                        .foregroundColor(.green)
-                case .unsupported:
-                    Text("⚠️ 当前模型可能不支持思考模式")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                case .unknown:
-                    Text("❓ 无法判断支持情况，可尝试手动开启")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                
                 NavigationLink {
                     SystemPromptEditView(prompt: $viewModel.customSystemPrompt)
                 } label: {
@@ -164,6 +153,13 @@ struct SettingsView: View {
             }
             
             Section(header: Text("高级")) {
+                // 思考模式
+                Picker("思考模式", selection: $viewModel.thinkingMode) {
+                    ForEach(ThinkingMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                
                 // 批量验证按钮
                 Button {
                     isValidating = true

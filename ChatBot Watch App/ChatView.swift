@@ -56,7 +56,16 @@ struct ChatView: View {
                                     
                                 } else {
                                     // 正常显示模式
-                                    PrettyMessageBubble(message: msg, isStreaming: viewModel.isLoading && msg.id == viewModel.currentMessages.last?.id)
+                                    let isLastMsg = msg.id == viewModel.currentMessages.last?.id
+                                    let isActivelyStreaming = viewModel.isLoading && isLastMsg && msg.role == .assistant
+                                    
+                                    if isActivelyStreaming {
+                                        // v1.6: 流式输出 — 使用轻量级纯文本气泡（不跑 Markdown/LaTeX）
+                                        StreamingBubbleView(theme: viewModel.currentTheme)
+                                    } else {
+                                        // 完成的消息 — 完整 Markdown 渲染
+                                        PrettyMessageBubble(message: msg, isStreaming: false, theme: viewModel.currentTheme)
+                                    }
                                     
                                     // v1.5: 最后一条 AI 消息下方显示操作按钮
                                     if msg.role == .assistant && 
@@ -70,6 +79,22 @@ struct ChatView: View {
                                                     Image(systemName: "arrow.clockwise")
                                                         .font(.system(size: 11))
                                                     Text("重新生成")
+                                                        .font(.system(size: 11))
+                                                }
+                                                .foregroundColor(.gray)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(Color.gray.opacity(0.2))
+                                                .cornerRadius(8)
+                                            }
+                                            .buttonStyle(.plain)
+                                            
+                                            // v1.6: 分享对话按钮
+                                            ShareLink(item: generateCurrentExportText()) {
+                                                HStack(spacing: 4) {
+                                                    Image(systemName: "square.and.arrow.up")
+                                                        .font(.system(size: 11))
+                                                    Text("分享")
                                                         .font(.system(size: 11))
                                                 }
                                                 .foregroundColor(.gray)
@@ -114,7 +139,7 @@ struct ChatView: View {
                                             HStack(spacing: 4) {
                                                 Image(systemName: "arrow.clockwise")
                                                     .font(.system(size: 11))
-                                                Text("重试") // 缩短文案以节省空间
+                                                Text("重试")
                                                     .font(.system(size: 11))
                                             }
                                             .foregroundColor(.blue)
@@ -127,9 +152,19 @@ struct ChatView: View {
                                     }
                                     .padding(.trailing, 4)
                                 }
-                                }
+                                } // end else
                             }
                             .id(msg.id)
+                        }
+                        
+                        // v1.6: AI 正在输入指示器（三个跳动圆点）— streamingText 有内容后自动隐藏
+                        if viewModel.isLoading,
+                           viewModel.streamingText.isEmpty,
+                           let lastMsg = viewModel.currentMessages.last,
+                           lastMsg.role == .user || lastMsg.text.isEmpty {
+                            TypingIndicatorView(theme: viewModel.currentTheme)
+                                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.isLoading)
                         }
                         
                         // 底部输入区域
@@ -223,9 +258,23 @@ struct ChatView: View {
             }
         }
     }
+    
+    // v1.6: 生成当前对话的导出文本
+    private func generateCurrentExportText() -> String {
+        guard let sessionId = viewModel.currentSessionId,
+              let session = viewModel.sessions.first(where: { $0.id == sessionId }) else {
+            return ""
+        }
+        var text = "# \(session.title)\n"
+        text += "📅 \(session.lastModified.formatted(date: .abbreviated, time: .shortened))\n"
+        text += "🤖 模型: \(viewModel.currentDisplayModelName)\n\n"
+        for msg in session.messages {
+            let role = msg.role == .user ? "👤 用户" : "🤖 助手"
+            text += "## \(role)\n\(msg.text)\n\n"
+        }
+        return text
+    }
 }
-
-
 
 // 底部检测偏移量 PreferenceKey
 struct BottomOffsetPreferenceKey: PreferenceKey {
@@ -321,14 +370,91 @@ struct EmptyStateView: View {
     }
 }
 
+// v1.6: iMessage/Telegram 风格打字指示器
+struct TypingIndicatorView: View {
+    let theme: AppTheme
+    @State private var animating = false
+    
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            HStack(spacing: 4) {
+                ForEach(0..<3) { i in
+                    Circle()
+                        .fill(Color.white.opacity(0.7))
+                        .frame(width: 7, height: 7)
+                        .offset(y: animating ? -6 : 0)
+                        .animation(
+                            .easeInOut(duration: 0.4)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(i) * 0.15),
+                            value: animating
+                        )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(theme.botBubbleColor)
+            .cornerRadius(12)
+            
+            Spacer()
+        }
+        .onAppear { animating = true }
+        .onDisappear { animating = false }
+    }
+}
+
+// v1.6: 流式输出 — 注视点渲染（LazyVStack 只渲染屏幕可见行）
+struct StreamingBubbleView: View {
+    @EnvironmentObject var viewModel: ChatViewModel
+    let theme: AppTheme
+    
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
+                // 流式思考内容
+                if !viewModel.streamingThinkingText.isEmpty {
+                    ThinkingContentView(content: viewModel.streamingThinkingText, isExpanded: .constant(false))
+                        .padding(.horizontal, 4)
+                }
+                
+                // 流式文本 — 按行拆分 + LazyVStack，只渲染屏幕内的行
+                if !viewModel.streamingText.isEmpty {
+                    let lines = viewModel.streamingText.components(separatedBy: "\n")
+                    
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                            if line.isEmpty {
+                                Spacer().frame(height: 6) // 空行间距
+                            } else {
+                                Text(line)
+                                    .font(.system(size: 14))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(theme.botBubbleColor)
+                    .cornerRadius(12)
+                    .foregroundColor(.white)
+                }
+            }
+            
+            Spacer()
+        }
+    }
+}
+
+
 // 增强版消息气泡：支持思考内容显示
 struct PrettyMessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool // v1.5: 性能优化，流式输出时为 true
+    let theme: AppTheme   // v1.6: 主题配色
     
-    init(message: ChatMessage, isStreaming: Bool = false) {
+    init(message: ChatMessage, isStreaming: Bool = false, theme: AppTheme = .classic) {
         self.message = message
         self.isStreaming = isStreaming
+        self.theme = theme
     }
     
     @State private var isThinkingExpanded: Bool = false
@@ -431,7 +557,7 @@ struct PrettyMessageBubble: View {
                     }
 
                     .padding(10)
-                    .background(message.role == .user ? Color.green : Color.gray.opacity(0.3))
+                    .background(message.role == .user ? theme.userBubbleColor : theme.botBubbleColor)
                     .cornerRadius(12)
                     .foregroundColor(.white)
                 }
@@ -574,12 +700,19 @@ struct ThinkingContentView: View {
             }
             .buttonStyle(.plain)
             
+            // 不展开 = 不渲染任何内容；展开 = LazyVStack 只渲染可见行
             if isExpanded {
+                let lines = content.components(separatedBy: "\n")
                 ScrollView {
-                    Text(content)
-                        .font(.system(size: 12))
-                        .foregroundColor(.gray)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                            Text(line.isEmpty ? " " : line)
+                                .font(.system(size: 12))
+                                .foregroundColor(.gray)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 100)
                 .padding(6)
