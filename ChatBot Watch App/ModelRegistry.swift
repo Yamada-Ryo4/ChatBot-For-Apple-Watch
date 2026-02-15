@@ -39,15 +39,16 @@ class ModelRegistry {
            lowerId.contains("cot") ||
            lowerId.contains("qvq") ||         // QwQ is visual reasoning
            lowerId.contains("gemini-3") ||    // Gemini 3 series usually supports reasoning
+           lowerId.contains("gemini-2.5-pro") ||
            lowerId.contains("qwq") {
             isThinking = true
         }
         
         // (B) 判断 Vision 能力
-        if lowerId.contains("gpt-4o") ||
+        if lowerId.contains("gpt") ||
            lowerId.contains("vision") ||
            lowerId.contains("vl") ||
-           lowerId.contains("claude-3") ||    // Claude 3 all support vision
+           lowerId.contains("claude") ||    // Claude 3 all support vision
            lowerId.contains("gemini") ||      // Modern Gemini supports vision
            lowerId.contains("llava") ||
            lowerId.contains("vila") ||
@@ -57,7 +58,7 @@ class ModelRegistry {
            lowerId.contains("multimodal") ||
            lowerId.contains("image") ||
            lowerId.contains("qvq") ||
-           lowerId.contains("o1") {           // o1 (final) supports vision; previews don't, but preciseMap handles previews
+           lowerId.contains("o") {           // o1 (final) supports vision; previews don't, but preciseMap handles previews
             isVision = true
         }
         

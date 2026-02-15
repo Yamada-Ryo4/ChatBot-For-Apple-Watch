@@ -67,7 +67,7 @@
 ### 3. 多模态与环境感知
 
 - **📷 视觉模型 (Vision)**
-  - 支持 GPT-4o、Gemini-2.5-Pro 等视觉模型。
+  - 支持 GPT-4o、Gemini-1.5-Pro 等视觉模型。
   - 直接从手表相册选择图片发送，让 AI 帮你"看图说话"。
 - **📍 环境注入 (Environment Injection)**
   - **时间感知**: 自动将当前准确时间注入 System Prompt，AI 再也不会问"今年是哪一年"。
@@ -111,7 +111,7 @@
 
 - **🌍 预设主流厂商**
   - **OpenAI** (GPT-3.5, GPT-4, GPT-4o)
-  - **Google Gemini** (Gemini-Pro, Flash)
+  - **Google Gemini** (Gemini-Pro, Flash, 1.5)
   - **DeepSeek** (深度求索 V3/R1)
   - **Zhipu AI** (智谱 GLM-4)
   - **Aliyun Qwen** (通义千问)
@@ -122,10 +122,20 @@
   - **OpenCode Zen** (v1.4 新增)
 - **🔧 高级自定义**
   - **自定义模型 ID**: 只要服务商支持，任何新出的模型 (如 `gpt-4o-2029-xx`) 都能手动填写 ID 使用。
-  - **自建代理 (BYOL)**: 支持任何格式的接口（如 OpenAI /responses、/chat/completions、gemini、anthropic/messages）。
-  - **本地模型**: 连接你电脑上的 **Ollama** 服务，实现完全内网的本地 AI 对话。
+  - **自建代理 (BYOL)**: 支持任何兼容 OpenAI 格式的接口（如 OneAPI、NewAPI）。
+  - **本地模型**: 连接你电脑上的 **Ollama** 服务，实现完全离线的本地 AI 对话。
 
-### 7. 隐私与安全
+### 7. 辅助模型 (Helper Model) *(v1.7 新增)*
+
+为了降低成本并提高响应速度，引入了 **Helper Model** 概念，专用于后台任务。
+
+- **降本增效**:
+  - 自动接管 **会话标题生成** 和 **记忆提取** 等后台任务。
+  - 建议配置为轻量级模型（如 `Gemini Flash` 或 `gpt-4o-mini`），不再消耗昂贵的主模型额度。
+- **独立配置**:
+  - 在 **设置 -> 高级** 中独立选择辅助模型，与主对话模型互不干扰。
+
+### 8. 隐私与安全
 
 - **🔒 数据本地化**
   - 所有聊天记录 (`UserDefaults`) 和 API Key 仅存储在您的 Apple Watch 本地。

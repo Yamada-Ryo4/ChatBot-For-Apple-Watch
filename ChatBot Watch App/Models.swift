@@ -193,6 +193,9 @@ struct ExportableConfig: Codable {
     var customSystemPrompt: String // 补回字段
     var thinkingMode: ThinkingMode = .auto // v1.6: 全局思考模式策略
     var modelSettings: [String: ModelSettings] = [:] // v1.7: 模型级设置
+    var memories: [MemoryItem]? = nil // v1.7: 记忆数据（可选）
+    var sessions: [ChatSession]? = nil // v1.7: 聊天记录（可选）
+    var helperGlobalModelID: String? = nil // v1.7: 辅助模型 ID（可选，用于标题生成等）
 }
 
 // MARK: - 模型能力配置 (v1.7)
@@ -216,4 +219,14 @@ enum ThinkingMode: String, Codable, Sendable, CaseIterable, Identifiable {
     case disabled = "强制关闭"
     
     var id: String { rawValue }
+}
+
+// MARK: - 记忆系统 (v1.7)
+struct MemoryItem: Identifiable, Codable, Hashable, Sendable {
+    var id = UUID()
+    var content: String          // 记忆内容（如"用户有两只猫"）
+    var createdAt: Date          // 创建时间
+    var source: String? = nil    // 来源会话标题（可选）
+    var embedding: [Float]? = nil // v1.7: 向量嵌入
+    var importance: Float = 0.5  // v1.7: 重要性评分 (0.0-1.0)
 }

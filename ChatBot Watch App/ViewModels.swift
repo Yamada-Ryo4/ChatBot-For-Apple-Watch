@@ -20,6 +20,11 @@ class ChatViewModel: ObservableObject {
     @AppStorage("thinkingMode") var thinkingModeRaw: String = ThinkingMode.auto.rawValue // v1.6: 思考模式
     @AppStorage("enableMessageAnimation") var enableMessageAnimation: Bool = true  // v1.6: 消息气泡动画
     @AppStorage("appThemeRaw") var appThemeRaw: String = AppTheme.classic.rawValue  // v1.6: 主题配色
+    @AppStorage("memoryEnabled") var memoryEnabled: Bool = true  // v1.7: 记忆功能开关
+    @AppStorage("embeddingProviderID") var embeddingProviderID: String = ""  // v1.7: Embedding 供应商 ID
+    @AppStorage("embeddingModelID") var embeddingModelID: String = ""  // v1.7: Embedding 模型 ID
+    @AppStorage("helperGlobalModelID") var helperGlobalModelID: String = "" // v1.7: 辅助模型 ID（用于标题生成等）
+    @Published var memories: [MemoryItem] = []  // v1.7: 记忆列表
     
     // v1.6: 主题计算属性
     var currentTheme: AppTheme {
@@ -67,10 +72,6 @@ class ChatViewModel: ObservableObject {
         streamingThinkingText = ""
     }
     init() {
-        // 预设版本号 - 更新时会智能合并，不会丢失用户数据
-        let currentVersion = "v20"
-        let hasLoaded = UserDefaults.standard.bool(forKey: "hasLoadedPresets_\(currentVersion)")
-        
         // 定义最新的预设供应商
         let latestPresets: [ProviderConfig] = [
             ProviderConfig(name: "智谱AI", baseURL: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", isPreset: true, icon: "sparkles"),
@@ -82,76 +83,57 @@ class ChatViewModel: ObservableObject {
             ProviderConfig(name: "阿里云百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", isPreset: true, icon: "cloud"),
             ProviderConfig(name: "ModelScope", baseURL: "https://api-inference.modelscope.cn/v1", apiKey: "", isPreset: true, icon: "cube"),
             ProviderConfig(name: "OpenRouter", baseURL: "https://openrouter.ai/api/v1", apiKey: "", isPreset: true, icon: "network"),
-            ProviderConfig(name: "Gemini", baseURL: "https://gemini.yamadaryo.me/v1beta", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .gemini),
-            ProviderConfig(name: "OpenCode Zen", baseURL: "https://opencode.ai/zen/v1", apiKey: "", isPreset: true, icon: "sparkle", apiType: .openAI)
+            ProviderConfig(name: "Gemini", baseURL: "https://gemini.yamadaryo.me/v1beta", apiKey: "", isPreset: true, icon: "sparkle", apiType: .gemini),
+            ProviderConfig(name: "OpenCode Zen", baseURL: "https://opencode.ai/zen/v1", apiKey: "", isPreset: true, icon: "bolt.fill", apiType: .openAI)
         ]
         
         if let decoded = try? JSONDecoder().decode([ProviderConfig].self, from: UserDefaults.standard.data(forKey: "savedProviders_v3") ?? Data()), !decoded.isEmpty {
-            if hasLoaded {
-                // 已加载过当前版本，直接使用保存的数据
-                self.providers = decoded
-                
-                // 启动时自动验证有 Key 但未验证的供应商
-                Task {
-                    for i in 0..<self.providers.count {
-                        if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
-                            await self.autoValidateProvider(index: i)
-                        }
+            // 每次启动都同步预设属性（图标、URL、apiType），但保留用户数据
+            var mergedProviders: [ProviderConfig] = []
+            
+            for preset in latestPresets {
+                if let existing = decoded.first(where: { $0.name == preset.name && $0.isPreset }) {
+                    // 同步预设属性，保留用户数据
+                    var updated = preset
+                    updated.id = existing.id  // 保持 ID 以维持选择状态
+                    updated.availableModels = existing.availableModels
+                    updated.favoriteModelIds = existing.favoriteModelIds
+                    updated.isValidated = existing.isValidated
+                    updated.lastUsedModelId = existing.lastUsedModelId
+                    updated.modelsLastFetched = existing.modelsLastFetched
+                    // 保留用户自己配置的 Key（如果预设 Key 为空 或 用户已修改过）
+                    if !existing.apiKey.isEmpty {
+                        updated.apiKeys = existing.apiKeys
+                        updated.currentKeyIndex = existing.currentKeyIndex
                     }
+                    mergedProviders.append(updated)
+                } else {
+                    // 新增的预设供应商
+                    mergedProviders.append(preset)
                 }
-            } else {
-                // 需要更新预设，但保留用户数据（收藏、可用模型、验证状态等）
-                var mergedProviders: [ProviderConfig] = []
-                
-                // 先处理预设供应商：用新配置但保留用户数据
-                for preset in latestPresets {
-                    if let existing = decoded.first(where: { $0.name == preset.name && $0.isPreset }) {
-                        // 用新的 URL/Key，但保留用户的收藏和模型数据
-                        var updated = preset
-                        updated.id = existing.id  // 保持 ID 以维持选择状态
-                        updated.availableModels = existing.availableModels
-                        updated.favoriteModelIds = existing.favoriteModelIds
-                        updated.isValidated = existing.isValidated
-                        updated.lastUsedModelId = existing.lastUsedModelId
-                        updated.modelsLastFetched = existing.modelsLastFetched
-                        // 如果用户自己配置了 Key，保留用户的
-                        if !existing.apiKey.isEmpty && preset.apiKey.isEmpty {
-                            updated.apiKeys = existing.apiKeys
-                            updated.currentKeyIndex = existing.currentKeyIndex
-                        }
-                        mergedProviders.append(updated)
-                    } else {
-                        // 新增的预设供应商
-                        mergedProviders.append(preset)
-                    }
-                }
-                
-                // 再添加用户自定义的非预设供应商
-                for custom in decoded where !custom.isPreset {
-                    mergedProviders.append(custom)
-                }
-                
-                self.providers = mergedProviders
-                UserDefaults.standard.set(true, forKey: "hasLoadedPresets_\(currentVersion)")
-                saveProviders()
-                print("✅ 预设已更新到 \(currentVersion)，用户数据已保留")
-                
-                // 版本更新后，验证未验证的供应商
-                Task {
-                    for i in 0..<self.providers.count {
-                        if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
-                            await self.autoValidateProvider(index: i)
-                        }
+            }
+            
+            // 保留用户自定义的非预设供应商
+            for custom in decoded where !custom.isPreset {
+                mergedProviders.append(custom)
+            }
+            
+            self.providers = mergedProviders
+            saveProviders()
+            
+            // 自动验证有 Key 但未验证的供应商
+            Task {
+                for i in 0..<self.providers.count {
+                    if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
+                        await self.autoValidateProvider(index: i)
                     }
                 }
             }
         } else {
             // 首次安装，使用全新预设
             self.providers = latestPresets
-            UserDefaults.standard.set(true, forKey: "hasLoadedPresets_\(currentVersion)")
             saveProviders()
             
-            // 首次启动时自动验证有 API Key 的供应商
             Task {
                 for i in 0..<self.providers.count {
                     if !self.providers[i].apiKey.isEmpty {
@@ -183,6 +165,7 @@ class ChatViewModel: ObservableObject {
         LocationService.shared.updateLocation()
         
         loadModelSettings() // v1.7: 加载模型能力配置
+        loadMemories()      // v1.7: 加载记忆
     }
     
     deinit {
@@ -398,16 +381,29 @@ class ChatViewModel: ObservableObject {
     
     // MARK: - 配置导出/导入
     
-    /// 导出配置为 JSON 数据
+    /// 导出全部配置（含记忆和聊天记录）
     func exportConfig() -> Data? {
         let exportData = ExportableConfig(
             providers: providers,
             selectedGlobalModelID: selectedGlobalModelID,
             temperature: temperature,
             historyMessageCount: historyMessageCount,
-            customSystemPrompt: customSystemPrompt
+            customSystemPrompt: customSystemPrompt,
+            memories: memories,
+            sessions: sessions,
+            helperGlobalModelID: helperGlobalModelID
         )
         return try? JSONEncoder().encode(exportData)
+    }
+    
+    /// 单独导出记忆
+    func exportMemories() -> Data? {
+        return try? JSONEncoder().encode(memories)
+    }
+    
+    /// 单独导出聊天记录
+    func exportSessions() -> Data? {
+        return try? JSONEncoder().encode(sessions)
     }
     
     /// 从 JSON 数据导入配置
@@ -419,6 +415,34 @@ class ChatViewModel: ObservableObject {
         self.historyMessageCount = config.historyMessageCount
         self.customSystemPrompt = config.customSystemPrompt
         saveProviders()
+        
+        // v1.7: 导入记忆（合并，不覆盖）
+        if let importedMemories = config.memories {
+            for mem in importedMemories {
+                if !memories.contains(where: { $0.content == mem.content }) {
+                    memories.append(mem)
+                }
+            }
+            if memories.count > maxMemoryCount {
+                memories = Array(memories.prefix(maxMemoryCount))
+            }
+            saveMemories()
+        }
+        
+        // v1.7: 导入聊天记录（合并）
+        if let importedSessions = config.sessions {
+            for session in importedSessions {
+                if !sessions.contains(where: { $0.id == session.id }) {
+                    sessions.append(session)
+                }
+            }
+            saveSessions()
+        }
+        
+        // v1.7: 导入辅助模型设置
+        if let helperID = config.helperGlobalModelID {
+            self.helperGlobalModelID = helperID
+        }
     }
     
     // 缓存模型名称，避免重复计算
@@ -485,7 +509,7 @@ class ChatViewModel: ObservableObject {
         
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
         if enableHapticFeedback { WKInterfaceDevice.current().play(.click) } // 开始生成震动
-        
+
         // v1.6: 初始化流式输出状态
         streamingText = ""
         streamingThinkingText = ""
@@ -498,7 +522,7 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = buildHistoryWithContext(from: msgs)
+            let history = await buildHistoryWithContext(from: msgs)
 
             var responseText = ""
             var thinkingText = ""
@@ -614,6 +638,22 @@ class ChatViewModel: ObservableObject {
                 saveSessions()
                 // 生成完成：成功震动
                 if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
+                
+                // v1.7: 后台提取记忆（非阻塞）
+                if self.memoryEnabled {
+                    Task { [weak self] in
+                        await self?.extractMemories()
+                    }
+                }
+                
+                // v1.7: 自动生成会话标题（首次对话时）
+                if let session = self.sessions.first(where: { $0.id == self.currentSessionId }),
+                   session.title == "新对话",
+                   let firstUserMsg = session.messages.first(where: { $0.role == .user }) {
+                    Task { [weak self] in
+                        await self?.generateSessionTitle(from: firstUserMsg.text)
+                    }
+                }
             } catch {
                 // v1.6: 先清空流式状态
                 streamingText = ""
@@ -650,7 +690,7 @@ class ChatViewModel: ObservableObject {
     }
     
     /// 解析 <think>...</think> 标签，返回 (思考内容, 剩余内容)
-    private func buildHistoryWithContext(from msgs: [ChatMessage]) -> [ChatMessage] {
+    private func buildHistoryWithContext(from msgs: [ChatMessage]) async -> [ChatMessage] {
         var history = msgs.dropLast(1).suffix(historyMessageCount).map { $0 }
         
         // 构造系统上下文
@@ -661,7 +701,39 @@ class ChatViewModel: ObservableObject {
             systemParts.append(customSystemPrompt)
         }
         
-        // 2. 时间和位置信息
+        // 2. v1.7: 注入长期记忆（全量回退模式）
+        if memoryEnabled && !memories.isEmpty {
+            // 从最后一条用户消息提取查询
+            let userQuery = msgs.last(where: { $0.role == .user })?.text ?? ""
+            let relevantMemories: [MemoryItem]
+            
+            // 检查是否有带 embedding 的记忆且已配置 Embedding 提供商
+            let hasEmbeddings = memories.contains(where: { $0.embedding != nil })
+            if hasEmbeddings, let (embConfig, embModel) = getEmbeddingProvider(), !userQuery.isEmpty {
+                // 向量检索 Top-5（综合相似度 + 重要性）
+                if let queryEmb = try? await service.fetchEmbedding(text: userQuery, modelId: embModel, config: embConfig) {
+                    var scored: [(MemoryItem, Float)] = memories.map { m in
+                        let similarity = m.embedding.map { cosineSimilarity(queryEmb, $0) } ?? 0.3
+                        let finalScore = similarity * 0.7 + m.importance * 0.3
+                        return (m, finalScore)
+                    }
+                    scored.sort { $0.1 > $1.1 }
+                    relevantMemories = scored.prefix(5).map { $0.0 }
+                } else {
+                    relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(10))
+                }
+            } else {
+                // 无 Embedding，按重要性排序注入（最多 10 条）
+                relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(10))
+            }
+            
+            if !relevantMemories.isEmpty {
+                let memoryLines = relevantMemories.map { "- \($0.content)" }.joined(separator: "\n")
+                systemParts.append("你知道以下关于用户的信息（长期记忆）：\n\(memoryLines)")
+            }
+        }
+        
+        // 3. 时间和位置信息
         let currentTime = Date().formatted(date: .numeric, time: .standard)
         var contextInfo = "Current Time: \(currentTime)"
         if let location = LocationService.shared.locationInfo {
@@ -712,6 +784,327 @@ class ChatViewModel: ObservableObject {
     }
     func clearCurrentChat() { updateCurrentSessionMessages([]) }
     
+    // MARK: - 记忆系统 (v1.7)
+    
+    private let maxMemoryCount = 50
+    
+    func saveMemories() {
+        if let encoded = try? JSONEncoder().encode(memories) {
+            UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
+            // v1.7: 同步到 iCloud
+            NSUbiquitousKeyValueStore.default.set(encoded, forKey: "userMemories_v1")
+            NSUbiquitousKeyValueStore.default.synchronize()
+        }
+    }
+    
+    func loadMemories() {
+        // 优先从 iCloud 加载，如果本地没有则用 iCloud 的
+        if let cloudData = NSUbiquitousKeyValueStore.default.data(forKey: "userMemories_v1"),
+           let cloudMemories = try? JSONDecoder().decode([MemoryItem].self, from: cloudData) {
+            // 其次加载本地
+            if let localData = UserDefaults.standard.data(forKey: "userMemories_v1"),
+               let localMemories = try? JSONDecoder().decode([MemoryItem].self, from: localData) {
+                // 合并：iCloud 和本地取并集
+                memories = mergeMemories(local: localMemories, cloud: cloudMemories)
+            } else {
+                memories = cloudMemories
+            }
+            // 同步合并结果到两边
+            saveMemories()
+        } else if let data = UserDefaults.standard.data(forKey: "userMemories_v1"),
+                  let decoded = try? JSONDecoder().decode([MemoryItem].self, from: data) {
+            memories = decoded
+        }
+        
+        // 监听 iCloud 变更
+        NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: NSUbiquitousKeyValueStore.default,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleiCloudMemoryChange()
+        }
+    }
+    
+    /// 合并本地和 iCloud 记忆（按内容去重）
+    private func mergeMemories(local: [MemoryItem], cloud: [MemoryItem]) -> [MemoryItem] {
+        var merged = local
+        for cloudMem in cloud {
+            if !merged.contains(where: { $0.content == cloudMem.content }) {
+                merged.append(cloudMem)
+            }
+        }
+        // 按时间排序，最新的在前面
+        merged.sort { $0.createdAt > $1.createdAt }
+        if merged.count > maxMemoryCount {
+            merged = Array(merged.prefix(maxMemoryCount))
+        }
+        return merged
+    }
+    
+    /// 处理 iCloud 远程变更
+    private func handleiCloudMemoryChange() {
+        guard let cloudData = NSUbiquitousKeyValueStore.default.data(forKey: "userMemories_v1"),
+              let cloudMemories = try? JSONDecoder().decode([MemoryItem].self, from: cloudData) else { return }
+        memories = mergeMemories(local: memories, cloud: cloudMemories)
+        // 只写本地，避免循环
+        if let encoded = try? JSONEncoder().encode(memories) {
+            UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
+        }
+        print("☁️ iCloud 记忆同步完成，当前共 \(memories.count) 条")
+    }
+    
+    func addMemory(_ content: String, embedding: [Float]? = nil, importance: Float = 0.5) {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // 去重：如果已存在相同内容的记忆，跳过
+        guard !memories.contains(where: { $0.content == trimmed }) else { return }
+        
+        let sessionTitle = sessions.first(where: { $0.id == currentSessionId })?.title
+        let item = MemoryItem(content: trimmed, createdAt: Date(), source: sessionTitle, embedding: embedding, importance: importance)
+        memories.insert(item, at: 0)
+        
+        // 超出上限，移除最旧的
+        if memories.count > maxMemoryCount {
+            memories = Array(memories.prefix(maxMemoryCount))
+        }
+        saveMemories()
+    }
+    
+    func deleteMemory(id: UUID) {
+        memories.removeAll { $0.id == id }
+        saveMemories()
+    }
+    
+    func deleteMemories(at offsets: IndexSet) {
+        memories.remove(atOffsets: offsets)
+        saveMemories()
+    }
+    
+    func clearAllMemories() {
+        memories.removeAll()
+        saveMemories()
+    }
+    
+    /// v1.7: 利用 LLM 从当前对话中提取记忆，并生成向量嵌入
+    func extractMemories() async {
+        guard memoryEnabled else { return }
+        
+        // 获取当前会话的消息（最近几轮）
+        let msgs = currentMessages
+        guard msgs.count >= 2 else { return }  // 至少有一问一答
+        
+        // 取最近 6 条消息（3 轮对话）用于提取
+        let recentMsgs = msgs.suffix(min(6, msgs.count))
+        let conversationText = recentMsgs.compactMap { msg -> String? in
+            guard msg.role != .system else { return nil }
+            let role = msg.role == .user ? "用户" : "AI"
+            return "\(role): \(msg.text)"
+        }.joined(separator: "\n")
+        
+        guard !conversationText.isEmpty else { return }
+        
+        // 构建提取 prompt (v1.7.2: 强化 Prompt，防止整段摘抄)
+        let extractionPrompt = """
+        任务：从以下对话中提取关于用户的关键事实信息。
+        要求：
+        1. 只提取事实（如姓名、年龄、喜好、习惯、计划等），不要提取闲聊或临时问题。
+        2. 必须用第三人称陈述句（例如："用户喜欢..."），**不要摘抄原文**。
+        3. 极度精简，每条信息不超过 20 字。
+        4. 格式：
+           - 普通事实：以 "- " 开头。
+           - 强调事实（用户明确要求记住）：以 "[!] " 开头。
+        5. 如果没有新事实，仅回复 "无"。
+        
+        示例：
+        对话：
+        用户：我下周要去北京出差。
+        AI：好的。
+        提取：
+        - 用户计划下周去北京出差
+        
+        对话内容：
+        \(conversationText)
+        """
+        
+        // 优先使用辅助模型 (v1.7.2)
+        let targetModelID = helperGlobalModelID.isEmpty ? selectedGlobalModelID : helperGlobalModelID
+        let components = targetModelID.split(separator: "|")
+        guard components.count == 2,
+              let providerID = UUID(uuidString: String(components[0])),
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return }
+        let modelID = String(components[1])
+        
+        // 使用非流式请求提取（收集全部结果）
+        let extractionMsg = ChatMessage(role: .user, text: extractionPrompt)
+        let stream = service.streamChat(
+            messages: [extractionMsg],
+            modelId: modelID,
+            config: provider,
+            temperature: 0.1  // 极低温度确保精确提取
+        )
+        
+        var result = ""
+        do {
+            for try await chunk in stream {
+                result += chunk
+            }
+        } catch {
+            print("⚠️ 记忆提取失败: \(error.localizedDescription)")
+            return
+        }
+        
+        // 解析结果
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "无", !trimmed.hasPrefix("无") else { return }
+        
+        // 获取 Embedding 提供商配置
+        let embProvider = getEmbeddingProvider()
+        
+        // 逐行解析 "- xxx" 格式
+        let lines = trimmed.components(separatedBy: "\n")
+        for line in lines {
+            var cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            // 解析 "[!] xxx" 或 "- xxx" 格式
+            var isHighPriority = false
+            if cleaned.hasPrefix("[!] ") {
+                cleaned = String(cleaned.dropFirst(4))
+                isHighPriority = true
+            } else if cleaned.hasPrefix("- ") {
+                cleaned = String(cleaned.dropFirst(2))
+            } else if cleaned.hasPrefix("* ") {
+                cleaned = String(cleaned.dropFirst(2))
+            }
+            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty, cleaned.count > 2 else { continue }
+            
+            // 生成向量嵌入（如果配置了 Embedding 提供商）
+            var emb: [Float]? = nil
+            if let (embConfig, embModel) = embProvider {
+                do {
+                    emb = try await service.fetchEmbedding(text: cleaned, modelId: embModel, config: embConfig)
+                } catch {
+                    print("⚠️ Embedding 生成失败: \(error.localizedDescription)")
+                }
+            }
+            
+            await MainActor.run {
+                addMemory(cleaned, embedding: emb, importance: isHighPriority ? 0.8 : 0.5)
+            }
+        }
+        
+        print("✅ 记忆提取完成，当前共 \(memories.count) 条记忆")
+    }
+    
+    /// 获取 Embedding 提供商配置
+    private func getEmbeddingProvider() -> (ProviderConfig, String)? {
+        guard !embeddingProviderID.isEmpty, !embeddingModelID.isEmpty,
+              let providerUUID = UUID(uuidString: embeddingProviderID),
+              let provider = providers.first(where: { $0.id == providerUUID }),
+              !provider.apiKey.isEmpty else { return nil }
+        return (provider, embeddingModelID)
+    }
+    
+    /// 余弦相似度
+    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dotProduct: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        for i in 0..<a.count {
+            dotProduct += a[i] * b[i]
+            normA += a[i] * a[i]
+            normB += b[i] * b[i]
+        }
+        let denominator = sqrt(normA) * sqrt(normB)
+        guard denominator > 0 else { return 0 }
+        return dotProduct / denominator
+    }
+    
+    /// 检索与查询最相关的 Top-K 记忆
+    func retrieveRelevantMemories(for query: String, topK: Int = 5) async -> [MemoryItem] {
+        // 如果没有配置 Embedding，返回全部记忆
+        guard let (embConfig, embModel) = getEmbeddingProvider() else {
+            return Array(memories.prefix(topK))
+        }
+        
+        // 检查是否有记忆带有 embedding
+        let memoriesWithEmbedding = memories.filter { $0.embedding != nil }
+        guard !memoriesWithEmbedding.isEmpty else {
+            return Array(memories.prefix(topK))
+        }
+        
+        // 生成查询向量
+        do {
+            let queryEmbedding = try await service.fetchEmbedding(text: query, modelId: embModel, config: embConfig)
+            
+            // 计算相似度并排序
+            var scored: [(memory: MemoryItem, score: Float)] = []
+            for memory in memories {
+                if let emb = memory.embedding {
+                    let score = cosineSimilarity(queryEmbedding, emb)
+                    scored.append((memory, score))
+                } else {
+                    // 没有 embedding 的记忆给中等分数
+                    scored.append((memory, 0.3))
+                }
+            }
+            
+            scored.sort { $0.score > $1.score }
+            return scored.prefix(topK).map { $0.memory }
+        } catch {
+            print("⚠️ 查询 Embedding 失败: \(error.localizedDescription)，回退全量注入")
+            return Array(memories.prefix(topK))
+        }
+    }
+    
+    /// v1.7: 自动生成会话标题
+    func generateSessionTitle(from firstMessage: String) async {
+        // 优先使用辅助模型，若未设置则使用当前模型
+        let targetModelID = helperGlobalModelID.isEmpty ? selectedGlobalModelID : helperGlobalModelID
+        
+        let components = targetModelID.split(separator: "|")
+        guard components.count == 2,
+              let providerID = UUID(uuidString: String(components[0])),
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return }
+        let modelID = String(components[1])
+        
+        let titlePrompt = "用不超过10个字总结以下内容的主题，只输出标题本身，不要加引号或标点：\n\(firstMessage.prefix(200))"
+        let titleMsg = ChatMessage(role: .user, text: titlePrompt)
+        let stream = service.streamChat(
+            messages: [titleMsg],
+            modelId: modelID,
+            config: provider,
+            temperature: 0.3
+        )
+        
+        var result = ""
+        do {
+            for try await chunk in stream {
+                result += chunk
+            }
+        } catch {
+            print("⚠️ 标题生成失败: \(error.localizedDescription)")
+            return
+        }
+        
+        let title = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "《", with: "")
+            .replacingOccurrences(of: "》", with: "")
+        guard !title.isEmpty, title.count <= 20 else { return }
+        
+        await MainActor.run {
+            if let idx = self.sessions.firstIndex(where: { $0.id == self.currentSessionId }) {
+                self.sessions[idx].title = title
+                self.saveSessions()
+                print("✅ 自动标题: \(title)")
+            }
+        }
+    }
+    
     /// 重新生成最后一条回复
     func regenerateLastMessage() {
         guard !isLoading else { return }
@@ -745,7 +1138,7 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = buildHistoryWithContext(from: msgs)
+            let history = await buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
             
@@ -1013,7 +1406,7 @@ class ChatViewModel: ObservableObject {
         let botIndex = msgs.count - 1
         
         currentTask = Task {
-            let history = buildHistoryWithContext(from: msgs)
+            let history = await buildHistoryWithContext(from: msgs)
             var responseText = ""
             var thinkingText = ""
             var firstTokenReceived = false

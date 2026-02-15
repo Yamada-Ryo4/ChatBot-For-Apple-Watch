@@ -33,6 +33,71 @@ class LLMService: NSObject {
         }
     }
     
+    // MARK: - v1.7: Embedding API
+    
+    func fetchEmbedding(text: String, modelId: String, config: ProviderConfig) async throws -> [Float] {
+        switch config.apiType {
+        case .openAI, .openAIResponses:
+            return try await fetchOpenAIEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
+        case .gemini:
+            return try await fetchGeminiEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
+        case .anthropic:
+            throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "Anthropic 不支持 Embedding API"])
+        }
+    }
+    
+    private func fetchOpenAIEmbedding(text: String, modelId: String, baseURL: String, apiKey: String) async throws -> [Float] {
+        guard let req = buildRequest(baseURL: baseURL, path: "embeddings", apiKey: apiKey, type: .openAI) else {
+            throw URLError(.badURL)
+        }
+        var request = req
+        request.httpMethod = "POST"
+        let body: [String: Any] = ["model": modelId, "input": text]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        let (data, _) = try await session.data(for: request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArr = json["data"] as? [[String: Any]],
+              let first = dataArr.first,
+              let embedding = first["embedding"] as? [Double] else {
+            // 检查是否有错误信息
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析 Embedding 响应"])
+        }
+        return embedding.map { Float($0) }
+    }
+    
+    private func fetchGeminiEmbedding(text: String, modelId: String, baseURL: String, apiKey: String) async throws -> [Float] {
+        let path = "models/\(modelId):embedContent"
+        guard let req = buildRequest(baseURL: baseURL, path: path, apiKey: apiKey, type: .gemini) else {
+            throw URLError(.badURL)
+        }
+        var request = req
+        request.httpMethod = "POST"
+        let body: [String: Any] = [
+            "model": "models/\(modelId)",
+            "content": ["parts": [["text": text]]]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        let (data, _) = try await session.data(for: request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let embeddingObj = json["embedding"] as? [String: Any],
+              let values = embeddingObj["values"] as? [Double] else {
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析 Gemini Embedding 响应"])
+        }
+        return values.map { Float($0) }
+    }
+    
     // MARK: - Implementations
     private func fetchOpenAIModels(baseURL: String, apiKey: String) async throws -> [AIModelInfo] {
         guard let request = buildRequest(baseURL: baseURL, path: "models", apiKey: apiKey, type: .openAI) else { throw URLError(.badURL) }
@@ -132,7 +197,20 @@ class LLMService: NSObject {
                     return ["role": role, "parts": parts]
                 }
                 let generationConfig: [String: Any] = ["temperature": temperature]
-                let body: [String: Any] = ["contents": contents, "generationConfig": generationConfig]
+                
+                // v1.7.1: 放宽安全限制，防止 "17岁" 等内容被误拦截
+                let safetySettings: [[String: Any]] = [
+                    ["category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"],
+                    ["category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"],
+                    ["category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"],
+                    ["category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"]
+                ]
+                
+                let body: [String: Any] = [
+                    "contents": contents,
+                    "generationConfig": generationConfig,
+                    "safetySettings": safetySettings
+                ]
                 let path = "models/\(modelId):streamGenerateContent?alt=sse"
                 
                 guard var req = buildRequest(baseURL: baseURL, path: path, apiKey: apiKey, type: .gemini) else { continuation.finish(throwing: URLError(.badURL)); return }

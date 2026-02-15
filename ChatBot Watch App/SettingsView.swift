@@ -11,6 +11,34 @@ struct SettingsView: View {
     @State private var isValidating = false
     @State private var validationResult: String? = nil
     
+    // v1.7: 从选中的 Embedding 供应商的模型列表中过滤 embedding 模型
+    var embeddingModelsForSelectedProvider: [AIModelInfo] {
+        guard !viewModel.embeddingProviderID.isEmpty,
+              let providerUUID = UUID(uuidString: viewModel.embeddingProviderID),
+              let provider = viewModel.providers.first(where: { $0.id == providerUUID }) else {
+            return []
+        }
+        return provider.availableModels.filter {
+            $0.id.localizedCaseInsensitiveContains("embed")
+        }.sorted { $0.id < $1.id }
+    }
+    
+    // v1.7: 辅助模型显示名称
+    var helperDisplayModelName: String {
+        if viewModel.helperGlobalModelID.isEmpty { return "跟随当前模型" }
+        let components = viewModel.helperGlobalModelID.split(separator: "|")
+        if components.count == 2 {
+            if let found = viewModel.allFavoriteModels.first(where: { $0.id == viewModel.helperGlobalModelID }) {
+                // 如果显示名称包含路径（如 model/gpt-4），只显示最后一段
+                let parts = found.displayName.split(separator: "/")
+                if parts.count >= 2 { return String(parts.last!).trimmingCharacters(in: .whitespaces) }
+                return found.displayName
+            }
+            return String(components[1])
+        }
+        return "跟随当前模型"
+    }
+    
     var body: some View {
         List {
             Section(header: Text("当前对话模型")) {
@@ -160,6 +188,75 @@ struct SettingsView: View {
                     }
                 }
                 
+
+                // v1.7: 记忆功能
+                Toggle("记忆功能", isOn: $viewModel.memoryEnabled)
+                
+                NavigationLink {
+                    MemoryView(viewModel: viewModel)
+                } label: {
+                    HStack {
+                        Text("记忆管理")
+                        Spacer()
+                        Text("\(viewModel.memories.count) 条")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // v1.7: Embedding 配置
+                if viewModel.memoryEnabled {
+                    Picker("向量供应商", selection: $viewModel.embeddingProviderID) {
+                        Text("未配置").tag("")
+                        ForEach(viewModel.providers) { provider in
+                            Text(provider.name).tag(provider.id.uuidString)
+                        }
+                    }
+                    
+                    if !viewModel.embeddingProviderID.isEmpty {
+                        let embModels = embeddingModelsForSelectedProvider
+                        if embModels.isEmpty {
+                            // 没有找到 embedding 模型，提示用户先获取模型列表
+                            NavigationLink {
+                                EmbeddingModelEditView(modelID: $viewModel.embeddingModelID)
+                            } label: {
+                                HStack {
+                                    Text("Embedding 模型")
+                                    Spacer()
+                                    Text(viewModel.embeddingModelID.isEmpty ? "手动输入" : viewModel.embeddingModelID)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                        } else {
+                            // 从模型列表中过滤出 embedding 模型
+                            Picker("Embedding 模型", selection: $viewModel.embeddingModelID) {
+                                Text("未选择").tag("")
+                                ForEach(embModels) { model in
+                                    Text(model.displayName ?? model.id)
+                                        .tag(model.id)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // v1.7: 辅助模型（标题生成等）
+                NavigationLink {
+                    HelperModelSelectionView(viewModel: viewModel)
+                } label: {
+                    HStack {
+                        Text("辅助模型")
+                        Spacer()
+                        Text(helperDisplayModelName)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                
                 // 批量验证按钮
                 Button {
                     isValidating = true
@@ -188,7 +285,24 @@ struct SettingsView: View {
                 if let configData = viewModel.exportConfig(),
                    let configString = String(data: configData, encoding: .utf8) {
                     ShareLink(item: configString) {
-                        Label("导出配置", systemImage: "square.and.arrow.up")
+                        Label("导出全部配置", systemImage: "square.and.arrow.up")
+                    }
+                }
+                
+                
+                // v1.7: 单独导出记忆
+                if let memData = viewModel.exportMemories(),
+                   let memString = String(data: memData, encoding: .utf8) {
+                    ShareLink(item: memString) {
+                        Label("单独导出记忆 (\(viewModel.memories.count)条)", systemImage: "brain.head.profile")
+                    }
+                }
+                
+                // v1.7: 单独导出聊天记录
+                if let sesData = viewModel.exportSessions(),
+                   let sesString = String(data: sesData, encoding: .utf8) {
+                    ShareLink(item: sesString) {
+                        Label("单独导出聊天 (\(viewModel.sessions.count)个)", systemImage: "message")
                     }
                 }
             }
@@ -793,5 +907,178 @@ struct ModelCapabilityConfigView: View {
     
     func save() {
         viewModel.updateModelSettings(modelId: modelID, thinking: settings.thinking, vision: settings.vision)
+    }
+}
+
+// MARK: - v1.7: Embedding 模型编辑视图
+struct EmbeddingModelEditView: View {
+    @Binding var modelID: String
+    @State private var draftModel: String = ""
+    @Environment(\.dismiss) var dismiss
+    
+    private let examples = [
+        "gemini-embedding-001",
+        "text-embedding-3-small",
+        "text-embedding-ada-002",
+        "BAAI/bge-large-zh-v1.5"
+    ]
+    
+    var body: some View {
+        Form {
+            Section(header: Text("Embedding 模型名称")) {
+                TextField("模型 ID", text: $draftModel)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            
+            Section(header: Text("常用模型")) {
+                ForEach(examples, id: \.self) { example in
+                    Button(example) {
+                        draftModel = example
+                    }
+                    .font(.caption)
+                }
+            }
+            
+            Section {
+                Button("保存") {
+                    modelID = draftModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    dismiss()
+                }
+                .disabled(draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .navigationTitle("Embedding 模型")
+        .onAppear { draftModel = modelID }
+    }
+}
+
+// MARK: - 辅助模型选择视图 (v1.7)
+struct HelperModelSelectionView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    @State private var searchText = ""
+    @Environment(\.dismiss) var dismiss
+    
+    var filteredFavorites: [(id: String, displayName: String, providerName: String)] {
+        if searchText.isEmpty { return viewModel.allFavoriteModels }
+        return viewModel.allFavoriteModels.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.providerName.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
+    var body: some View {
+        List {
+            Section {
+                Button(action: {
+                    viewModel.helperGlobalModelID = "" // 清空表示跟随当前
+                    dismiss()
+                }) {
+                    HStack {
+                        Text("跟随当前模型")
+                            .foregroundColor(viewModel.helperGlobalModelID.isEmpty ? .blue : .primary)
+                        Spacer()
+                        if viewModel.helperGlobalModelID.isEmpty {
+                            Image(systemName: "checkmark").foregroundColor(.blue)
+                        }
+                    }
+                }
+            } header: {
+                Text("默认设置")
+            }
+            
+            TextField("搜索模型...", text: $searchText).textInputAutocapitalization(.never)
+            
+            if !filteredFavorites.isEmpty {
+                Section(header: Text("⭐ 收藏模型")) {
+                    ForEach(filteredFavorites, id: \.id) { item in
+                        let isSelected = (viewModel.helperGlobalModelID == item.id)
+                        Button(action: {
+                            viewModel.helperGlobalModelID = item.id
+                            dismiss()
+                        }) {
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(item.displayName).foregroundColor(isSelected ? .blue : .primary)
+                                    Text(item.providerName).font(.caption2).foregroundColor(.gray)
+                                }
+                                Spacer()
+                                if isSelected { Image(systemName: "checkmark").foregroundColor(.blue) }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if searchText.isEmpty {
+                Section(header: Text("所有模型")) {
+                    ForEach(viewModel.providers) { provider in
+                        if !provider.availableModels.isEmpty {
+                            NavigationLink {
+                                HelperModelListForProviderView(viewModel: viewModel, provider: provider)
+                            } label: {
+                                HStack {
+                                    Image(systemName: provider.icon).frame(width: 20)
+                                    Text(provider.name)
+                                    Spacer()
+                                    Text("\(provider.availableModels.count)").font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("选择辅助模型")
+    }
+}
+
+struct HelperModelListForProviderView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let provider: ProviderConfig
+    @Environment(\.dismiss) var dismiss
+    @State private var searchText = ""
+    
+    var filteredModels: [AIModelInfo] {
+        if searchText.isEmpty { return provider.availableModels }
+        return provider.availableModels.filter {
+            $0.id.localizedCaseInsensitiveContains(searchText) ||
+            ($0.displayName?.localizedCaseInsensitiveContains(searchText) ?? false)
+        }
+    }
+    
+    // v1.5: 排序逻辑
+    var sortedModels: [AIModelInfo] {
+        return filteredModels.sorted {
+            let name1 = $0.displayName?.lowercased() ?? $0.id.lowercased()
+            let name2 = $1.displayName?.lowercased() ?? $1.id.lowercased()
+            return name1 < name2
+        }
+    }
+    
+    var body: some View {
+        List {
+            TextField("搜索...", text: $searchText).textInputAutocapitalization(.never)
+            ForEach(sortedModels) { model in
+                let fullID = "\(provider.id.uuidString)|\(model.id)"
+                let isSelected = (viewModel.helperGlobalModelID == fullID)
+                Button(action: {
+                    viewModel.helperGlobalModelID = fullID
+                }) {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(model.displayName ?? model.id)
+                                .foregroundColor(isSelected ? .blue : .primary)
+                            Text(model.id)
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                        }
+                        Spacer()
+                        if isSelected { Image(systemName: "checkmark").foregroundColor(.blue) }
+                    }
+                }
+            }
+        }
+        .navigationTitle(provider.name)
     }
 }
