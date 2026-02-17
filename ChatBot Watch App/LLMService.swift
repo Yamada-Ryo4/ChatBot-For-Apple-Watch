@@ -1,7 +1,6 @@
 import Foundation
 
 // 这是一个纯逻辑服务，不涉及 UI，所以不要加 @MainActor
-// 这是一个纯逻辑服务，不涉及 UI，所以不要加 @MainActor
 class LLMService: NSObject {
     
     private lazy var session: URLSession = {
@@ -21,6 +20,7 @@ class LLMService: NSObject {
         case .openAI, .openAIResponses: return try await fetchOpenAIModels(baseURL: config.baseURL, apiKey: config.apiKey)
         case .gemini: return try await fetchGeminiModels(baseURL: config.baseURL, apiKey: config.apiKey)
         case .anthropic: return try await fetchAnthropicModels(baseURL: config.baseURL, apiKey: config.apiKey)
+        case .workersAI: return [] // Workers AI 无模型列表接口
         }
     }
 
@@ -30,29 +30,57 @@ class LLMService: NSObject {
         case .gemini: return streamGeminiChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         case .openAIResponses: return streamOpenAIResponses(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         case .anthropic: return streamAnthropicChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
+        case .workersAI: return streamOpenAIChat(messages: messages, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, temperature: temperature)
         }
     }
     
     // MARK: - v1.7: Embedding API
     
-    func fetchEmbedding(text: String, modelId: String, config: ProviderConfig) async throws -> [Float] {
+    func fetchEmbedding(text: String, modelId: String, config: ProviderConfig, dimensions: Int? = nil) async throws -> [Float] {
         switch config.apiType {
         case .openAI, .openAIResponses:
-            return try await fetchOpenAIEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
+            return try await fetchOpenAIEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, dimensions: dimensions)
         case .gemini:
-            return try await fetchGeminiEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey)
+            return try await fetchGeminiEmbedding(text: text, modelId: modelId, baseURL: config.baseURL, apiKey: config.apiKey, dimensions: dimensions)
+        case .workersAI:
+            return try await fetchWorkersAIEmbedding(text: text, baseURL: config.baseURL)
         case .anthropic:
             throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "Anthropic 不支持 Embedding API"])
         }
     }
     
-    private func fetchOpenAIEmbedding(text: String, modelId: String, baseURL: String, apiKey: String) async throws -> [Float] {
+    // MARK: - Workers AI Embedding
+    
+    private func fetchWorkersAIEmbedding(text: String, baseURL: String) async throws -> [Float] {
+        let urlString = baseURL.hasPrefix("http") ? baseURL : "https://\(baseURL)"
+        guard let url = URL(string: urlString) else { throw URLError(.badURL) }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        
+        let (data, _) = try await session.data(for: request)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArr = json["data"] as? [[Double]],
+              let first = dataArr.first else {
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = json["error"] as? String {
+                throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: error])
+            }
+            throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析 Workers AI 响应"])
+        }
+        return first.map { Float($0) }
+    }
+    
+    private func fetchOpenAIEmbedding(text: String, modelId: String, baseURL: String, apiKey: String, dimensions: Int? = nil) async throws -> [Float] {
         guard let req = buildRequest(baseURL: baseURL, path: "embeddings", apiKey: apiKey, type: .openAI) else {
             throw URLError(.badURL)
         }
         var request = req
         request.httpMethod = "POST"
-        let body: [String: Any] = ["model": modelId, "input": text]
+        var body: [String: Any] = ["model": modelId, "input": text]
+        if let dim = dimensions { body["dimensions"] = dim }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         let (data, _) = try await session.data(for: request)
@@ -71,17 +99,18 @@ class LLMService: NSObject {
         return embedding.map { Float($0) }
     }
     
-    private func fetchGeminiEmbedding(text: String, modelId: String, baseURL: String, apiKey: String) async throws -> [Float] {
+    private func fetchGeminiEmbedding(text: String, modelId: String, baseURL: String, apiKey: String, dimensions: Int? = nil) async throws -> [Float] {
         let path = "models/\(modelId):embedContent"
         guard let req = buildRequest(baseURL: baseURL, path: path, apiKey: apiKey, type: .gemini) else {
             throw URLError(.badURL)
         }
         var request = req
         request.httpMethod = "POST"
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": "models/\(modelId)",
             "content": ["parts": [["text": text]]]
         ]
+        if let dim = dimensions { body["outputDimensionality"] = dim }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         let (data, _) = try await session.data(for: request)
@@ -465,7 +494,7 @@ class LLMService: NSObject {
         if cleanBase.hasSuffix("/") { cleanBase = String(cleanBase.dropLast()) }
         var fullPath = ""
         switch type {
-        case .openAI, .openAIResponses: fullPath = "\(cleanBase)/\(path)"
+        case .openAI, .openAIResponses, .workersAI: fullPath = "\(cleanBase)/\(path)"
         case .gemini:
             if cleanBase.contains("/v1beta") { fullPath = "\(cleanBase)/\(path)" }
             else { fullPath = "\(cleanBase)/v1beta/\(path)" }
@@ -486,6 +515,7 @@ class LLMService: NSObject {
         case .anthropic:
             request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
             request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        case .workersAI: break // Workers AI 不需要认证
         }
         return request
     }

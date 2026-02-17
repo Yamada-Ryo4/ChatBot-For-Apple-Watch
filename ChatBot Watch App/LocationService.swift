@@ -70,17 +70,23 @@ class LocationService: NSObject, ObservableObject, CLLocationManagerDelegate {
     
     // MARK: - IP Location
     private func fetchIPLocation() {
-        guard let url = URL(string: "http://ip-api.com/json/?fields=country,city,offset") else { return }
+        // v1.12: 使用 HTTPS 避免明文传输用户 IP 和位置信息
+        guard let url = URL(string: "https://ipapi.co/json/") else {
+            DispatchQueue.main.async { [weak self] in self?.isUpdating = false }
+            return
+        }
         
         URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let self = self, let data = data, error == nil else {
-                DispatchQueue.main.async { self?.isUpdating = false }
+            guard let self = self else { return }
+            
+            guard let data = data, error == nil else {
+                DispatchQueue.main.async { self.isUpdating = false }
                 return
             }
             
             // 简单的 JSON 解析结构
             struct IPInfo: Decodable {
-                let country: String
+                let country_name: String
                 let city: String
             }
             
@@ -88,9 +94,11 @@ class LocationService: NSObject, ObservableObject, CLLocationManagerDelegate {
                 DispatchQueue.main.async {
                     // 如果 GPS 已经成功了，就不覆盖
                     if self.locationInfo?.contains("GPS") == true { return }
-                    self.locationInfo = "Location: \(ipInfo.country) \(ipInfo.city) (Source: IP)"
+                    self.locationInfo = "Location: \(ipInfo.country_name) \(ipInfo.city) (Source: IP)"
                     self.isUpdating = false
                 }
+            } else {
+                DispatchQueue.main.async { self.isUpdating = false }
             }
         }.resume()
     }

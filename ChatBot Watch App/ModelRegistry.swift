@@ -58,7 +58,7 @@ class ModelRegistry {
            lowerId.contains("multimodal") ||
            lowerId.contains("image") ||
            lowerId.contains("qvq") ||
-           lowerId.contains("o") {           // o1 (final) supports vision; previews don't, but preciseMap handles previews
+           lowerId.range(of: #"\bo[134]-"#, options: .regularExpression) != nil {  // o1/o3/o4-mini 系列
             isVision = true
         }
         

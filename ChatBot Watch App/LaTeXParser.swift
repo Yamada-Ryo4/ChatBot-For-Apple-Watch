@@ -2,8 +2,10 @@ import Foundation
 import SwiftUI
 
 // MARK: - AST Nodes
-// MARK: - AST Nodes
 enum LatexNode: Identifiable, Hashable {
+    // 注意：每次访问创建新 UUID — 这会让 SwiftUI 每帧全量重绘 LaTeX 视图，
+    // 但 enum 无法存储实例属性，且 hashValue 方案会碰撞导致重复节点丢失。
+    // 对于公式渲染场景（节点数少，非频繁更新），性能影响可忽略。
     var id: String { UUID().uuidString }
     
     case text(String)

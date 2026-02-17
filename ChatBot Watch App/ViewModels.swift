@@ -4,6 +4,7 @@ import Combine
 import WatchKit
 import ClockKit
 import ImageIO
+import Accelerate
 @MainActor
 class ChatViewModel: ObservableObject {
     @AppStorage("savedProviders_v3") var savedProvidersData: Data = Data()
@@ -23,8 +24,24 @@ class ChatViewModel: ObservableObject {
     @AppStorage("memoryEnabled") var memoryEnabled: Bool = true  // v1.7: 记忆功能开关
     @AppStorage("embeddingProviderID") var embeddingProviderID: String = ""  // v1.7: Embedding 供应商 ID
     @AppStorage("embeddingModelID") var embeddingModelID: String = ""  // v1.7: Embedding 模型 ID
-    @AppStorage("helperGlobalModelID") var helperGlobalModelID: String = "" // v1.7: 辅助模型 ID（用于标题生成等）
+    @AppStorage("helperGlobalModelID") var helperGlobalModelID: String = "" // v1.7: 辅助模型 ID
+    @AppStorage("detectedEmbeddingDim") var detectedEmbeddingDim: Int = 0  // v1.8: 探测到的向量维度
+    @AppStorage("workersAIEmbeddingURL") var workersAIEmbeddingURL: String = ""  // v1.8: Workers AI 向量端点
+    @AppStorage("cloudBackupURL") var cloudBackupURL: String = ""  // v1.10: 云备份端点
+    @AppStorage("cloudBackupAuthKey") var cloudBackupAuthKey: String = ""  // v1.10: 云备份认证
     @Published var memories: [MemoryItem] = []  // v1.7: 记忆列表
+    @Published var migrationProgress: String? = nil  // v1.8: 迁移进度提示
+    @Published var cloudUploadStatus: String? = nil  // v1.10: 云上传状态
+    @AppStorage("lastCloudSyncTime") var lastCloudSyncTime: Double = 0  // v1.12: 最后同步时间戳
+    @AppStorage("autoBackupEnabled") var autoBackupEnabled: Bool = false  // v1.12: 自动备份开关
+    @Published var cachedVersions: [BackupVersion]? = nil  // v1.12: 本地缓存的版本列表
+    var previewCache: [String: BackupPreview] = [:]  // v1.12: UUID->预览 缓存
+    
+    // v1.10: 导入模式
+    enum ImportMode {
+        case overwrite  // 全量覆盖（清空本地，使用云端）
+        case merge      // 增量合并（保留本地，添加云端新增）
+    }
     
     // v1.6: 主题计算属性
     var currentTheme: AppTheme {
@@ -116,6 +133,20 @@ class ChatViewModel: ObservableObject {
             // 保留用户自定义的非预设供应商
             for custom in decoded where !custom.isPreset {
                 mergedProviders.append(custom)
+            }
+            
+            // v1.8: 保留被删除的预设（如果用户有数据）
+            for oldPreset in decoded where oldPreset.isPreset {
+                let stillExists = latestPresets.contains(where: { $0.name == oldPreset.name })
+                if !stillExists {
+                    // 用户有 Key 或有收藏模型 → 降级为自定义供应商
+                    if !oldPreset.apiKey.isEmpty || !oldPreset.favoriteModelIds.isEmpty {
+                        var demoted = oldPreset
+                        demoted.isPreset = false
+                        mergedProviders.append(demoted)
+                    }
+                    // 否则是空壳，安全移除
+                }
             }
             
             self.providers = mergedProviders
@@ -255,8 +286,6 @@ class ChatViewModel: ObservableObject {
     func saveProviders() {
         if let encoded = try? JSONEncoder().encode(providers) {
             savedProvidersData = encoded
-            // 触发云端同步
-            SyncService.shared.upload()
         }
     }
     
@@ -379,31 +408,690 @@ class ChatViewModel: ObservableObject {
         return list
     }
     
-    // MARK: - 配置导出/导入
+    // MARK: - 配置导出/导入 (v1.9: S7 文件优化版)
     
-    /// 导出全部配置（含记忆和聊天记录）
-    func exportConfig() -> Data? {
+    private func saveToTempFile(data: Data, filename: String) -> URL? {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent(filename)
+        do {
+            try data.write(to: fileURL)
+            return fileURL
+        } catch {
+            print("Export file write error: \(error)")
+            return nil
+        }
+    }
+    
+    /// 导出配置为文件（去除向量以减小体积）
+    func exportConfigURL() -> URL? {
+        // 去除 vector 数据，大幅减小体积防止 Watch 卡死
+        let strippedMemories = memories.map { var m = $0; m.embedding = nil; return m }
         let exportData = ExportableConfig(
             providers: providers,
             selectedGlobalModelID: selectedGlobalModelID,
             temperature: temperature,
             historyMessageCount: historyMessageCount,
             customSystemPrompt: customSystemPrompt,
-            memories: memories,
+            thinkingMode: thinkingMode,
+            modelSettings: modelSettings,
+            memories: strippedMemories,
             sessions: sessions,
-            helperGlobalModelID: helperGlobalModelID
+            helperGlobalModelID: helperGlobalModelID,
+            embeddingDimension: detectedEmbeddingDim > 0 ? detectedEmbeddingDim : nil,
+            embeddingProviderID: embeddingProviderID.isEmpty ? nil : embeddingProviderID,
+            embeddingModelID: embeddingModelID.isEmpty ? nil : embeddingModelID,
+            workersAIEmbeddingURL: workersAIEmbeddingURL.isEmpty ? nil : workersAIEmbeddingURL,
+            cloudBackupURL: cloudBackupURL.isEmpty ? nil : cloudBackupURL,
+            cloudBackupAuthKey: cloudBackupAuthKey.isEmpty ? nil : cloudBackupAuthKey,
+            memoryEnabled: memoryEnabled
         )
-        return try? JSONEncoder().encode(exportData)
+        guard let data = try? JSONEncoder().encode(exportData) else { return nil }
+        let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
+        return saveToTempFile(data: data, filename: "ChatBot_Config_\(dateStr).json")
     }
     
-    /// 单独导出记忆
-    func exportMemories() -> Data? {
-        return try? JSONEncoder().encode(memories)
+    /// 单独导出记忆（文件URL，无向量）
+    func exportMemoriesURL() -> URL? {
+        let stripped = memories.map { var m = $0; m.embedding = nil; return m }
+        guard let data = try? JSONEncoder().encode(stripped) else { return nil }
+        let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
+        return saveToTempFile(data: data, filename: "ChatBot_Memories_\(dateStr).json")
     }
     
-    /// 单独导出聊天记录
-    func exportSessions() -> Data? {
-        return try? JSONEncoder().encode(sessions)
+    /// 单独导出聊天记录（文件URL）
+    func exportSessionsURL() -> URL? {
+        guard let data = try? JSONEncoder().encode(sessions) else { return nil }
+        let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
+        return saveToTempFile(data: data, filename: "ChatBot_Chats_\(dateStr).json")
+    }
+    
+    // MARK: - 云备份 (v1.10: R2 直传)
+    
+    /// 上传配置到云端
+    func uploadConfigToCloud() async {
+        await MainActor.run { cloudUploadStatus = "⬆️ 正在上传..." }
+        
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let requestURL = URL(string: url) else {
+            await MainActor.run { cloudUploadStatus = "❌ URL 无效" }
+            return
+        }
+        
+        // 去除 embedding 向量减小体积
+        let strippedMemories = memories.map { var m = $0; m.embedding = nil; return m }
+        let exportData = ExportableConfig(
+            providers: providers,
+            selectedGlobalModelID: selectedGlobalModelID,
+            temperature: temperature,
+            historyMessageCount: historyMessageCount,
+            customSystemPrompt: customSystemPrompt,
+            thinkingMode: thinkingMode,
+            modelSettings: modelSettings,
+            memories: strippedMemories,
+            sessions: sessions,
+            helperGlobalModelID: helperGlobalModelID,
+            embeddingDimension: detectedEmbeddingDim > 0 ? detectedEmbeddingDim : nil,
+            embeddingProviderID: embeddingProviderID.isEmpty ? nil : embeddingProviderID,
+            embeddingModelID: embeddingModelID.isEmpty ? nil : embeddingModelID,
+            workersAIEmbeddingURL: workersAIEmbeddingURL.isEmpty ? nil : workersAIEmbeddingURL,
+            cloudBackupURL: cloudBackupURL.isEmpty ? nil : cloudBackupURL,
+            cloudBackupAuthKey: cloudBackupAuthKey.isEmpty ? nil : cloudBackupAuthKey,
+            memoryEnabled: memoryEnabled
+        )
+        
+        guard let jsonData = try? JSONEncoder().encode(exportData) else {
+            await MainActor.run { cloudUploadStatus = "❌ JSON 编码失败" }
+            return
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        do {
+            let (responseData, response) = try await URLSession.shared.upload(for: request, from: jsonData)
+            let httpResponse = response as? HTTPURLResponse
+            let statusCode = httpResponse?.statusCode ?? 0
+            let sizeKB = String(format: "%.1f", Double(jsonData.count) / 1024.0)
+            
+            // v1.12: 解析 Workers 返回的 JSON 响应
+            var serverMessage = ""
+            if let resData = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let msg = resData["message"] as? String {
+                serverMessage = msg
+            }
+            
+            await MainActor.run {
+                if (200...299).contains(statusCode) {
+                    if serverMessage.contains("跳过") || serverMessage.contains("无变化") {
+                        cloudUploadStatus = "⏭️ 内容无变化，已跳过"
+                    } else {
+                        cloudUploadStatus = "✅ 上传成功 (\(sizeKB)KB)"
+                        // 自动刷新列表 (异步)
+                        Task { try? await self.fetchBackupVersions(forceRefresh: true) }
+                    }
+                    lastCloudSyncTime = Date().timeIntervalSince1970
+                } else {
+                    cloudUploadStatus = "❌ 服务器返回 \(statusCode)"
+                }
+            }
+        } catch {
+            await MainActor.run {
+                cloudUploadStatus = "❌ 上传失败: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    // MARK: - v1.12: 重命名备份
+    func renameBackup(key: String, name: String) async -> (success: Bool, message: String) {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            return (false, "URL 无效")
+        }
+        
+        let filename = baseURL.lastPathComponent
+        let baseString = baseURL.deletingLastPathComponent().absoluteString
+        guard let renameURL = URL(string: "\(baseString)rename/\(key)") else {
+            return (false, "URL 构造失败")
+        }
+        
+        var request = URLRequest(url: renameURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        do {
+            let body = ["name": name]
+            request.httpBody = try JSONEncoder().encode(body)
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let httpResponse = response as? HTTPURLResponse
+            let statusCode = httpResponse?.statusCode ?? 0
+            
+            if (200...299).contains(statusCode) {
+                // 重命名成功后刷新列表
+                Task { try? await self.fetchBackupVersions(forceRefresh: true) }
+                return (true, "重命名成功")
+            } else {
+                return (false, "HTTP \(statusCode)")
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+    
+    /// 从云端下载并恢复配置
+    func downloadConfigFromCloud(mode: ImportMode) async throws {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let requestURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        
+        switch mode {
+        case .overwrite:
+            try importFullConfig(from: data)
+        case .merge:
+            try mergeConfig(from: data)
+        }
+    }
+    
+
+    
+    /// v1.10: 增量合并配置
+    // v1.12: 导入选项（细化为 8 项）
+    enum ImportOption: String, CaseIterable, Identifiable, Hashable {
+        case providers = "供应商配置"
+        case memories = "记忆库"
+        case sessions = "聊天记录"
+        case modelParams = "模型参数"
+        case embeddingConfig = "向量配置"
+        case cloudConfig = "云备份配置"
+        case helperModel = "辅助模型"
+        case modelSettings = "模型级设置"
+        var id: String { rawValue }
+    }
+    
+    /// v1.12: 从云端获取配置对象（不立即导入）
+    func fetchConfigFromCloud() async throws -> ExportableConfig {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let requestURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return try JSONDecoder().decode(ExportableConfig.self, from: data)
+    }
+    
+    /// v1.12: 测试云端连接
+    func testCloudConnection() async -> (success: Bool, message: String) {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let requestURL = URL(string: url) else {
+            return (false, "URL 无效")
+        }
+        
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let httpResponse = response as? HTTPURLResponse
+            let statusCode = httpResponse?.statusCode ?? 0
+            
+            if statusCode == 401 {
+                return (false, "认证失败 (401)")
+            } else if statusCode == 404 {
+                return (true, "连接正常，暂无备份")
+            } else if (200...299).contains(statusCode) {
+                let sizeKB = String(format: "%.1f", Double(data.count) / 1024.0)
+                // 尝试解析并返回摘要
+                if let config = try? JSONDecoder().decode(ExportableConfig.self, from: data) {
+                    return (true, "连接正常 · \(sizeKB)KB · \(config.providers.count)供应商 · \(config.memories?.count ?? 0)记忆 · \(config.sessions?.count ?? 0)会话")
+                }
+                return (true, "连接正常 (\(sizeKB)KB)")
+            } else {
+                return (false, "HTTP \(statusCode)")
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+    
+    // MARK: - v1.12: 历史版本管理 (Workers 新 API)
+    
+    /// 历史版本信息（支持 Codable 以便本地缓存）
+    struct BackupVersion: Identifiable, Codable {
+        let key: String
+        let version: Int
+        let label: String
+        let size: Int
+        let uploaded: String?
+        let uuid: String?
+        let customName: String?
+        
+        var id: String { uuid ?? key }
+        
+        /// 主标题（优先显示自定义名称）
+        var displayName: String {
+            if let name = customName, !name.isEmpty, name != "null" { return name }
+            if version == 0 { return "当前配置" }
+            return "备份 \(version)"
+        }
+        
+        /// 副标题（大小 + 时间）
+        var displaySubtitle: String {
+            var timeStr = ""
+            if let uploaded = uploaded {
+                let isoFormatter = ISO8601DateFormatter()
+                // 优先尝试带毫秒的格式 (Workers通常返回这种)
+                isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                var date = isoFormatter.date(from: uploaded)
+                
+                // 如果失败，尝试标准格式
+                if date == nil {
+                    isoFormatter.formatOptions = [.withInternetDateTime]
+                    date = isoFormatter.date(from: uploaded)
+                }
+                
+                if let d = date {
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+                    timeStr = formatter.string(from: d)
+                }
+            }
+            return "\(sizeText)  \(timeStr)"
+        }
+        
+        /// 格式化大小
+        var sizeText: String {
+            if size > 1024 * 1024 {
+                return String(format: "%.1fMB", Double(size) / 1024.0 / 1024.0)
+            }
+            return String(format: "%.1fKB", Double(size) / 1024.0)
+        }
+        
+        /// 容错解码（自动转换本地时间）
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            key = try c.decode(String.self, forKey: .key)
+            version = (try? c.decode(Int.self, forKey: .version)) ?? 0
+            size = (try? c.decode(Int.self, forKey: .size)) ?? 0
+            uploaded = try? c.decodeIfPresent(String.self, forKey: .uploaded)
+            uuid = try? c.decodeIfPresent(String.self, forKey: .uuid)
+            customName = try? c.decodeIfPresent(String.self, forKey: .customName)
+            
+            // label 字段保留用于兼容（虽然 UI 可能不再直接使用它）
+            label = (try? c.decode(String.self, forKey: .label)) ?? key
+        }
+
+        
+        init(key: String, version: Int, label: String, size: Int, uploaded: String?, uuid: String?, customName: String? = nil) {
+            self.key = key; self.version = version; self.label = label
+            self.size = size; self.uploaded = uploaded; self.uuid = uuid
+            self.customName = customName
+        }
+    }
+    
+    /// 获取历史版本列表（自动缓存）
+    func fetchBackupVersions(forceRefresh: Bool = false) async throws -> [BackupVersion] {
+        // 如果有缓存且不强制刷新，直接返回
+        if !forceRefresh, let cached = cachedVersions {
+            return cached
+        }
+        
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        let filename = baseURL.lastPathComponent
+        let baseString = baseURL.deletingLastPathComponent().absoluteString
+        guard let listURL = URL(string: "\(baseString)list/\(filename)") else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 构造失败"])
+        }
+        
+        var request = URLRequest(url: listURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        
+        struct ListResponse: Decodable {
+            let status: String
+            let versions: [BackupVersion]
+        }
+        
+        let response = try JSONDecoder().decode(ListResponse.self, from: data)
+        let versions = response.versions
+        
+        // 保存到本地缓存
+        await MainActor.run {
+            cachedVersions = versions
+        }
+        // 持久化到 UserDefaults
+        if let encoded = try? JSONEncoder().encode(versions) {
+            UserDefaults.standard.set(encoded, forKey: "cachedBackupVersions")
+        }
+        
+        return versions
+    }
+    
+    /// 从本地缓存加载版本列表
+    func loadCachedVersions() -> [BackupVersion]? {
+        guard let data = UserDefaults.standard.data(forKey: "cachedBackupVersions"),
+              let versions = try? JSONDecoder().decode([BackupVersion].self, from: data) else {
+            return nil
+        }
+        return versions
+    }
+    
+    /// 恢复指定历史版本
+    func restoreBackupVersion(key: String, mode: ImportMode) async throws {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        // 构造历史版本 URL：替换最后的文件名部分
+        let versionURL = baseURL.deletingLastPathComponent().appendingPathComponent(key)
+        
+        var request = URLRequest(url: versionURL)
+        request.httpMethod = "GET"
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        
+        switch mode {
+        case .overwrite:
+            try importFullConfig(from: data)
+        case .merge:
+            try mergeConfig(from: data)
+        }
+        
+        lastCloudSyncTime = Date().timeIntervalSince1970
+    }
+    
+    /// 删除指定历史版本
+    func deleteBackupVersion(key: String) async throws {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        let versionURL = baseURL.deletingLastPathComponent().appendingPathComponent(key)
+        
+        var request = URLRequest(url: versionURL)
+        request.httpMethod = "DELETE"
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as? HTTPURLResponse
+        if let statusCode = httpResponse?.statusCode, !(200...299).contains(statusCode) {
+            throw NSError(domain: "CloudBackup", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "删除失败 (HTTP \(statusCode))"])
+        }
+    }
+    
+    /// 配置预览信息（Workers /preview/ 响应）
+    struct BackupPreview: Decodable {
+        let status: String
+        let key: String
+        let size: Int
+        let uploaded: String?
+        let providers: Int?
+        let memories: Int?
+        let sessions: Int?
+        let details: PreviewDetails?
+        
+        struct PreviewDetails: Decodable {
+            let providerNames: [String]?
+            let selectedModel: String?
+            let temperature: Double?
+            let historyCount: Int?
+            let thinkingMode: Bool?
+            let memoryEnabled: Bool?
+            let hasCustomPrompt: Bool?
+            
+            /// 容错解码：任何字段类型不匹配都不会导致整体失败
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                providerNames = try? c.decodeIfPresent([String].self, forKey: .providerNames)
+                selectedModel = try? c.decodeIfPresent(String.self, forKey: .selectedModel)
+                temperature = try? c.decodeIfPresent(Double.self, forKey: .temperature)
+                historyCount = try? c.decodeIfPresent(Int.self, forKey: .historyCount)
+                thinkingMode = try? c.decodeIfPresent(Bool.self, forKey: .thinkingMode)
+                memoryEnabled = try? c.decodeIfPresent(Bool.self, forKey: .memoryEnabled)
+                hasCustomPrompt = try? c.decodeIfPresent(Bool.self, forKey: .hasCustomPrompt)
+            }
+            
+            private enum CodingKeys: String, CodingKey {
+                case providerNames, selectedModel, temperature, historyCount
+                case thinkingMode, memoryEnabled, hasCustomPrompt
+            }
+        }
+        
+        /// 容错解码：key/size 必须有，其余都可选
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            status = (try? c.decode(String.self, forKey: .status)) ?? "unknown"
+            key = try c.decode(String.self, forKey: .key)
+            size = try c.decode(Int.self, forKey: .size)
+            uploaded = try? c.decodeIfPresent(String.self, forKey: .uploaded)
+            providers = try? c.decodeIfPresent(Int.self, forKey: .providers)
+            memories = try? c.decodeIfPresent(Int.self, forKey: .memories)
+            sessions = try? c.decodeIfPresent(Int.self, forKey: .sessions)
+            details = try? c.decodeIfPresent(PreviewDetails.self, forKey: .details)
+        }
+        
+        private enum CodingKeys: String, CodingKey {
+            case status, key, size, uploaded, providers, memories, sessions, details
+        }
+        
+        var sizeText: String {
+            if size > 1024 * 1024 {
+                return String(format: "%.1fMB", Double(size) / 1024.0 / 1024.0)
+            }
+            return String(format: "%.1fKB", Double(size) / 1024.0)
+        }
+    }
+    
+    /// 预览指定版本的配置摘要（带 UUID 缓存）
+    func previewBackupVersion(key: String, uuid: String? = nil) async throws -> BackupPreview {
+        // 有 UUID 且已缓存 → 直接返回
+        if let uuid = uuid, let cached = previewCache[uuid] {
+            return cached
+        }
+        
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        // 构造 /preview/{key} URL
+        // appendingPathComponent 会将 / 编码为 %2F，需用字符串拼接
+        let baseString = baseURL.deletingLastPathComponent().absoluteString
+        guard let previewURL = URL(string: "\(baseString)preview/\(key)") else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 构造失败"])
+        }
+        
+        var request = URLRequest(url: previewURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let preview = try JSONDecoder().decode(BackupPreview.self, from: data)
+        
+        // 缓存结果
+        if let uuid = uuid {
+            previewCache[uuid] = preview
+        }
+        
+        return preview
+    }
+    
+    /// 一键去重历史备份
+    func deduplicateBackups() async throws -> (removed: Int, remaining: Int, message: String) {
+        let url = cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty, let baseURL = URL(string: url) else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 无效"])
+        }
+        
+        let filename = baseURL.lastPathComponent
+        let baseString = baseURL.deletingLastPathComponent().absoluteString
+        guard let dedupURL = URL(string: "\(baseString)dedup/\(filename)") else {
+            throw NSError(domain: "CloudBackup", code: -1, userInfo: [NSLocalizedDescriptionKey: "URL 构造失败"])
+        }
+        
+        var request = URLRequest(url: dedupURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30  // 去重可能耗时较长
+        let authKey = cloudBackupAuthKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !authKey.isEmpty {
+            request.setValue(authKey, forHTTPHeaderField: "X-Auth-Key")
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        
+        struct DedupResponse: Decodable {
+            let status: String
+            let message: String
+            let removed: Int?
+            let remaining: Int?
+        }
+        
+        let response = try JSONDecoder().decode(DedupResponse.self, from: data)
+        
+        // 去重后清除缓存，下次列表强制刷新
+        await MainActor.run { cachedVersions = nil }
+        previewCache.removeAll()
+        
+        return (removed: response.removed ?? 0, remaining: response.remaining ?? 0, message: response.message)
+    }
+    
+    /// App 启动时自动静默备份（不影响 UI）
+    func performAutoBackupIfNeeded() {
+        guard autoBackupEnabled,
+              !cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        
+        Task {
+            await uploadConfigToCloud()
+            print("☁️ 自动备份完成")
+        }
+    }
+
+    /// v1.10: 增量合并配置 (默认全选)
+    func mergeConfig(from data: Data) throws {
+        let config = try JSONDecoder().decode(ExportableConfig.self, from: data)
+        try mergeConfig(from: config, options: Set(ImportOption.allCases))
+    }
+    
+    /// v1.12: 增量合并配置 (带选项，8 项细粒度)
+    func mergeConfig(from config: ExportableConfig, options: Set<ImportOption>) throws {
+        // 1. 供应商配置 (ID 不存在才添加)
+        if options.contains(.providers) {
+            for p in config.providers {
+                if !providers.contains(where: { $0.id == p.id }) {
+                    providers.append(p)
+                }
+            }
+            saveProviders()
+        }
+        
+        // 2. 记忆库 (内容不重复才添加)
+        if options.contains(.memories), let importedMemories = config.memories {
+            for mem in importedMemories {
+                if !memories.contains(where: { $0.content == mem.content }) {
+                    memories.append(mem)
+                }
+            }
+            saveMemories()
+        }
+        
+        // 3. 聊天记录 (ID 不重复才添加)
+        if options.contains(.sessions), let importedSessions = config.sessions {
+            for session in importedSessions {
+                if !sessions.contains(where: { $0.id == session.id }) {
+                    sessions.append(session)
+                }
+            }
+            saveSessions()
+        }
+        
+        // 4. 模型参数 (温度、历史、提示词、思考模式)
+        if options.contains(.modelParams) {
+            self.temperature = config.temperature
+            self.historyMessageCount = config.historyMessageCount
+            self.customSystemPrompt = config.customSystemPrompt
+            self.thinkingModeRaw = config.thinkingMode.rawValue
+        }
+        
+        // 5. 向量配置 (供应商、模型、URL、维度)
+        if options.contains(.embeddingConfig) {
+            if let pid = config.embeddingProviderID { self.embeddingProviderID = pid }
+            if let mid = config.embeddingModelID { self.embeddingModelID = mid }
+            if let wurl = config.workersAIEmbeddingURL { self.workersAIEmbeddingURL = wurl }
+            if let dim = config.embeddingDimension, dim > 0 { self.detectedEmbeddingDim = dim }
+            if let enabled = config.memoryEnabled { self.memoryEnabled = enabled }
+        }
+        
+        // 6. 云备份配置 (URL、认证密钥)
+        if options.contains(.cloudConfig) {
+            if let curl = config.cloudBackupURL { self.cloudBackupURL = curl }
+            if let ckey = config.cloudBackupAuthKey { self.cloudBackupAuthKey = ckey }
+        }
+        
+        // 7. 辅助模型
+        if options.contains(.helperModel) {
+            if let hid = config.helperGlobalModelID { self.helperGlobalModelID = hid }
+        }
+        
+        // 8. 模型级设置 (能力开关等)
+        if options.contains(.modelSettings) {
+            for (key, value) in config.modelSettings {
+                self.modelSettings[key] = value
+            }
+            saveModelSettings()
+        }
     }
     
     /// 从 JSON 数据导入配置
@@ -443,6 +1131,100 @@ class ChatViewModel: ObservableObject {
         if let helperID = config.helperGlobalModelID {
             self.helperGlobalModelID = helperID
         }
+        // v1.8: 导入维度信息
+        if let dim = config.embeddingDimension, dim > 0 {
+            self.detectedEmbeddingDim = dim
+        }
+        
+        // v1.12: 导入向量配置
+        if let pid = config.embeddingProviderID { self.embeddingProviderID = pid }
+        if let mid = config.embeddingModelID { self.embeddingModelID = mid }
+        if let wurl = config.workersAIEmbeddingURL { self.workersAIEmbeddingURL = wurl }
+        if let enabled = config.memoryEnabled { self.memoryEnabled = enabled }
+        
+        // v1.12: 导入云备份配置
+        if let curl = config.cloudBackupURL { self.cloudBackupURL = curl }
+        if let ckey = config.cloudBackupAuthKey { self.cloudBackupAuthKey = ckey }
+        
+        // v1.12: 导入思考模式和模型级设置
+        self.thinkingModeRaw = config.thinkingMode.rawValue
+        for (key, value) in config.modelSettings {
+            self.modelSettings[key] = value
+        }
+        saveModelSettings()
+    }
+    
+    /// v1.10: 从 URL 下载并导入配置 (R2 方案)
+    func importConfigFromURL(_ url: URL) async throws {
+        let (data, _) = try await URLSession.shared.data(from: url)
+        try importFullConfig(from: data)
+    }
+    
+    /// 兼容旧版：从一般字符串导入
+    func importFullConfig(from jsonString: String) throws {
+        guard let data = jsonString.data(using: .utf8) else {
+            throw NSError(domain: "Import", code: -1, userInfo: [NSLocalizedDescriptionKey: "JSON 解析失败"])
+        }
+        try importFullConfig(from: data)
+    }
+    
+    /// v1.8: 全量覆盖导入（用于设备迁移/重装恢复）
+    func importFullConfig(from data: Data) throws {
+        let config = try JSONDecoder().decode(ExportableConfig.self, from: data)
+        
+        // 全量覆盖 providers
+        self.providers = config.providers
+        self.temperature = config.temperature
+        self.historyMessageCount = config.historyMessageCount
+        self.customSystemPrompt = config.customSystemPrompt
+        self.thinkingModeRaw = config.thinkingMode.rawValue  // v1.12: 恢复思考模式
+        saveProviders()
+        
+        // v1.12: 验证 selectedGlobalModelID 引用的供应商是否存在
+        let importedID = config.selectedGlobalModelID
+        let idComponents = importedID.split(separator: "|")
+        if idComponents.count == 2,
+           let providerUUID = UUID(uuidString: String(idComponents[0])),
+           providers.contains(where: { $0.id == providerUUID }) {
+            self.selectedGlobalModelID = importedID
+        } else {
+            print("⚠️ 导入的 selectedGlobalModelID 无效，保留当前设置")
+        }
+        
+        // 全量覆盖记忆
+        if let importedMemories = config.memories {
+            self.memories = importedMemories
+            saveMemories()
+        }
+        
+        // 全量覆盖会话
+        if let importedSessions = config.sessions {
+            self.sessions = importedSessions
+            saveSessions()
+        }
+        
+        if let helperID = config.helperGlobalModelID {
+            self.helperGlobalModelID = helperID
+        }
+        if let dim = config.embeddingDimension, dim > 0 {
+            self.detectedEmbeddingDim = dim
+        }
+        
+        // v1.12: 恢复向量配置
+        if let pid = config.embeddingProviderID { self.embeddingProviderID = pid }
+        if let mid = config.embeddingModelID { self.embeddingModelID = mid }
+        if let wurl = config.workersAIEmbeddingURL { self.workersAIEmbeddingURL = wurl }
+        if let enabled = config.memoryEnabled { self.memoryEnabled = enabled }
+        
+        // v1.12: 恢复云备份配置
+        if let curl = config.cloudBackupURL { self.cloudBackupURL = curl }
+        if let ckey = config.cloudBackupAuthKey { self.cloudBackupAuthKey = ckey }
+        
+        // 重新加载模型设置
+        for (key, value) in config.modelSettings {
+            modelSettings[key] = value
+        }
+        saveModelSettings()
     }
     
     // 缓存模型名称，避免重复计算
@@ -521,6 +1303,10 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
+        // v1.12: 首 Token 时间跟踪
+        var firstTokenReceived = false
+        var localFirstTokenTime: Date? = nil
+        
         currentTask = Task {
             let history = await buildHistoryWithContext(from: msgs)
 
@@ -542,9 +1328,19 @@ class ChatViewModel: ObservableObject {
                     // 检查是否被取消
                     if Task.isCancelled { break }
                     
+                    // v1.12: 记录首 Token 时间
+                    if !firstTokenReceived {
+                        firstTokenReceived = true
+                        localFirstTokenTime = Date()
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].firstTokenTime = localFirstTokenTime
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        }
+                    }
+                    
                     // 1. 处理内部标记 (保留兼容性)
                     var processedChunk = chunk
-                    if let range = processedChunk.range(of: "🧠THINK:") {
+                    if processedChunk.contains("🧠THINK:") {
                          processedChunk = processedChunk.replacingOccurrences(of: "🧠THINK:", with: "")
                     }
                     
@@ -614,24 +1410,26 @@ class ChatViewModel: ObservableObject {
                 }
                 
                 // v1.6: 流式完成 — 一次性写入 sessions（触发完整 Markdown 渲染）
-                do {
-                    let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let finalThinking = thinkingText
+                let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let finalThinking = thinkingText
+                
+                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    currentMsgs[botIndex].text = finalContent
                     
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        currentMsgs[botIndex].text = finalContent
-                        
-                        if thinkingMode == .disabled {
-                            currentMsgs[botIndex].thinkingContent = nil
-                        } else {
-                            currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        }
-                        
-                        // 先清空流式状态，再写入 sessions
-                        streamingText = ""
-                        streamingThinkingText = ""
-                        updateCurrentSessionMessagesInMemory(currentMsgs)
+                    if thinkingMode == .disabled {
+                        currentMsgs[botIndex].thinkingContent = nil
+                    } else {
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
                     }
+                    
+                    // v1.12: 记录完成时间
+                    currentMsgs[botIndex].completeTime = Date()
+                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                    
+                    // 先清空流式状态，再写入 sessions
+                    streamingText = ""
+                    streamingThinkingText = ""
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
                 }
                 
                 // 流式输出完成后，一次性保存到磁盘
@@ -689,7 +1487,7 @@ class ChatViewModel: ObservableObject {
         }
     }
     
-    /// 解析 <think>...</think> 标签，返回 (思考内容, 剩余内容)
+    /// 构建带系统上下文的历史消息列表（注入记忆、时间、位置等）
     private func buildHistoryWithContext(from msgs: [ChatMessage]) async -> [ChatMessage] {
         var history = msgs.dropLast(1).suffix(historyMessageCount).map { $0 }
         
@@ -749,32 +1547,7 @@ class ChatViewModel: ObservableObject {
         return history
     }
 
-    private func parseThinkTags(_ text: String) -> (thinking: String?, content: String) {
-        var thinking = ""
-        var content = text
-        
-        // 匹配 <think> 和 </think> 标签（包括未闭合的情况）
-        let openTag = "<think>"
-        let closeTag = "</think>"
-        
-        while let openRange = content.range(of: openTag, options: .caseInsensitive) {
-            let beforeThink = String(content[..<openRange.lowerBound])
-            let afterOpen = String(content[openRange.upperBound...])
-            
-            if let closeRange = afterOpen.range(of: closeTag, options: .caseInsensitive) {
-                // 找到闭合标签
-                thinking += String(afterOpen[..<closeRange.lowerBound])
-                content = beforeThink + String(afterOpen[closeRange.upperBound...])
-            } else {
-                // 未闭合，剩余部分都是思考内容（流式场景）
-                thinking += afterOpen
-                content = beforeThink
-                break
-            }
-        }
-        
-        return (thinking.isEmpty ? nil : thinking, content)
-    }
+    // parseThinkTags 已移除 — 所有路径统一使用状态机解析器 (v1.12)
     
     func appendSystemMessage(_ text: String) {
         if currentSessionId == nil { createNewSession() }
@@ -786,87 +1559,89 @@ class ChatViewModel: ObservableObject {
     
     // MARK: - 记忆系统 (v1.7)
     
-    private let maxMemoryCount = 50
+    private let maxMemoryCount = 200  // v1.8: 扩容
     
     func saveMemories() {
         if let encoded = try? JSONEncoder().encode(memories) {
             UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
-            // v1.7: 同步到 iCloud
-            NSUbiquitousKeyValueStore.default.set(encoded, forKey: "userMemories_v1")
-            NSUbiquitousKeyValueStore.default.synchronize()
+            // 备份重心已转移至 R2，不再同步到 iCloud KVS（1MB 限制易溢出）
         }
     }
     
     func loadMemories() {
-        // 优先从 iCloud 加载，如果本地没有则用 iCloud 的
-        if let cloudData = NSUbiquitousKeyValueStore.default.data(forKey: "userMemories_v1"),
-           let cloudMemories = try? JSONDecoder().decode([MemoryItem].self, from: cloudData) {
-            // 其次加载本地
-            if let localData = UserDefaults.standard.data(forKey: "userMemories_v1"),
-               let localMemories = try? JSONDecoder().decode([MemoryItem].self, from: localData) {
-                // 合并：iCloud 和本地取并集
-                memories = mergeMemories(local: localMemories, cloud: cloudMemories)
-            } else {
-                memories = cloudMemories
-            }
-            // 同步合并结果到两边
-            saveMemories()
-        } else if let data = UserDefaults.standard.data(forKey: "userMemories_v1"),
-                  let decoded = try? JSONDecoder().decode([MemoryItem].self, from: data) {
+        // 从本地 UserDefaults 加载（备份/恢复走 R2）
+        if let data = UserDefaults.standard.data(forKey: "userMemories_v1"),
+           let decoded = try? JSONDecoder().decode([MemoryItem].self, from: data) {
             memories = decoded
         }
-        
-        // 监听 iCloud 变更
-        NotificationCenter.default.addObserver(
-            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-            object: NSUbiquitousKeyValueStore.default,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleiCloudMemoryChange()
-        }
     }
     
-    /// 合并本地和 iCloud 记忆（按内容去重）
-    private func mergeMemories(local: [MemoryItem], cloud: [MemoryItem]) -> [MemoryItem] {
-        var merged = local
-        for cloudMem in cloud {
-            if !merged.contains(where: { $0.content == cloudMem.content }) {
-                merged.append(cloudMem)
-            }
-        }
-        // 按时间排序，最新的在前面
-        merged.sort { $0.createdAt > $1.createdAt }
-        if merged.count > maxMemoryCount {
-            merged = Array(merged.prefix(maxMemoryCount))
-        }
-        return merged
-    }
+    // iCloud 记忆相关代码已移除 — 备份/恢复走 R2 (v1.12)
     
-    /// 处理 iCloud 远程变更
-    private func handleiCloudMemoryChange() {
-        guard let cloudData = NSUbiquitousKeyValueStore.default.data(forKey: "userMemories_v1"),
-              let cloudMemories = try? JSONDecoder().decode([MemoryItem].self, from: cloudData) else { return }
-        memories = mergeMemories(local: memories, cloud: cloudMemories)
-        // 只写本地，避免循环
-        if let encoded = try? JSONEncoder().encode(memories) {
-            UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
-        }
-        print("☁️ iCloud 记忆同步完成，当前共 \(memories.count) 条")
-    }
-    
-    func addMemory(_ content: String, embedding: [Float]? = nil, importance: Float = 0.5) {
+    func addMemory(_ content: String, embedding: [Float]? = nil, importance: Float = 0.5, type: MemoryType = .longTerm, expiration: Date? = nil) {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // 去重：如果已存在相同内容的记忆，跳过
-        guard !memories.contains(where: { $0.content == trimmed }) else { return }
+        
+        // v1.8: 语义去重 — 用向量相似度检测近义记忆
+        if let newEmb = embedding {
+            for i in memories.indices {
+                if let existingEmb = memories[i].embedding {
+                    let sim = cosineSimilarity(newEmb, existingEmb)
+                    if sim > 0.85 {
+                        // 语义高度相似，更新内容而非重复添加
+                        print("🔄 语义去重：\(trimmed) ≈ \(memories[i].content)（相似度 \(String(format: "%.2f", sim))）")
+                        memories[i].content = trimmed  // 用更新的表述替换
+                        memories[i].lastUpdated = Date()
+                        if memories[i].type == .shortTerm && type == .longTerm {
+                            memories[i].type = .longTerm
+                            memories[i].expiration = nil
+                        }
+                        if importance > memories[i].importance { memories[i].importance = importance }
+                        saveMemories()
+                        return
+                    }
+                }
+            }
+        }
+        
+        // 精确去重：相同文本只更新时间戳
+        if let existingIdx = memories.firstIndex(where: { $0.content == trimmed }) {
+            memories[existingIdx].lastUpdated = Date()
+            if memories[existingIdx].type == .shortTerm && type == .longTerm {
+                memories[existingIdx].type = .longTerm
+                memories[existingIdx].expiration = nil
+            }
+            saveMemories()
+            return
+        }
         
         let sessionTitle = sessions.first(where: { $0.id == currentSessionId })?.title
-        let item = MemoryItem(content: trimmed, createdAt: Date(), source: sessionTitle, embedding: embedding, importance: importance)
+        let item = MemoryItem(
+            content: trimmed, createdAt: Date(), source: sessionTitle,
+            embedding: embedding, importance: importance,
+            type: type, expiration: expiration, lastUpdated: Date()
+        )
         memories.insert(item, at: 0)
         
-        // 超出上限，移除最旧的
-        if memories.count > maxMemoryCount {
-            memories = Array(memories.prefix(maxMemoryCount))
+        // v1.8: 智能淘汰 — 200 条上限仅计长期记忆，临时记忆不占名额
+        // 1. 先清理过期临时记忆
+        memories.removeAll { $0.type == .shortTerm && $0.isExpired }
+        
+        // 2. 长期记忆超过上限时，拒绝新增（不自动删）
+        let longTermCount = memories.filter { $0.type == .longTerm }.count
+        if longTermCount > maxMemoryCount && type == .longTerm {
+            print("⚠️ 长期记忆已满（\(maxMemoryCount)条），无法添加")
+            memories.removeFirst() // 移除刚插入的
+        }
+        
+        // 3. 临时记忆超 200 条时，淘汰最旧的临时记忆
+        let shortTermMems = memories.enumerated().filter { $0.element.type == .shortTerm && !$0.element.isExpired }
+        if shortTermMems.count > 200 {
+            if let oldestIdx = shortTermMems
+                .min(by: { ($0.element.lastUpdated ?? $0.element.createdAt) < ($1.element.lastUpdated ?? $1.element.createdAt) })
+                .map({ $0.offset }) {
+                memories.remove(at: oldestIdx)
+            }
         }
         saveMemories()
     }
@@ -886,15 +1661,14 @@ class ChatViewModel: ObservableObject {
         saveMemories()
     }
     
-    /// v1.7: 利用 LLM 从当前对话中提取记忆，并生成向量嵌入
+    /// v1.8: 利用 LLM 从当前对话中提取记忆（双轨模式 + 反幻觉）
     func extractMemories() async {
         guard memoryEnabled else { return }
         
-        // 获取当前会话的消息（最近几轮）
         let msgs = currentMessages
-        guard msgs.count >= 2 else { return }  // 至少有一问一答
+        guard msgs.count >= 2 else { return }
         
-        // 取最近 6 条消息（3 轮对话）用于提取
+        // 取最近 6 条消息（3 轮对话）
         let recentMsgs = msgs.suffix(min(6, msgs.count))
         let conversationText = recentMsgs.compactMap { msg -> String? in
             guard msg.role != .system else { return nil }
@@ -904,30 +1678,44 @@ class ChatViewModel: ObservableObject {
         
         guard !conversationText.isEmpty else { return }
         
-        // 构建提取 prompt (v1.7.2: 强化 Prompt，防止整段摘抄)
+        // v1.8: 反幻觉 + 去重侧写 Prompt
         let extractionPrompt = """
-        任务：从以下对话中提取关于用户的关键事实信息。
-        要求：
-        1. 只提取事实（如姓名、年龄、喜好、习惯、计划等），不要提取闲聊或临时问题。
-        2. 必须用第三人称陈述句（例如："用户喜欢..."），**不要摘抄原文**。
-        3. 极度精简，每条信息不超过 20 字。
-        4. 格式：
-           - 普通事实：以 "- " 开头。
-           - 强调事实（用户明确要求记住）：以 "[!] " 开头。
-        5. 如果没有新事实，仅回复 "无"。
-        
-        示例：
+        任务：你是一个用户侧写分析师，从对话中提取用户的真实信息。
+
+        ━━━ 绝对禁止 ━━━
+        • 禁止提取 AI 说的任何内容（建议、举例、假设、反问）作为用户事实。
+        • 禁止自行推测或补充信息。
+        • 只有用户亲口说出或明确确认的内容才能提取。
+        • 禁止把"用户要求记住X"作为单独一条——直接记X本身。
+        • 相关联的信息必须合并为一条，绝不拆分。
+
+        ━━━ 合并规则（极重要） ━━━
+        同一个人/事/属性的不同侧面必须合并为一条：
+        ❌ 错误（拆分）：1. 用户今年17岁  2. 用户2009年出生
+        ✅ 正确（合并）：[长期] 用户2009年生，今年17岁
+
+        ❌ 错误（元记录）：用户要求记住他今年17岁
+        ✅ 正确：直接记事实本身，不记"要求记住"这个动作
+
+        ━━━ 反例 ━━━
         对话：
-        用户：我下周要去北京出差。
-        AI：好的。
-        提取：
-        - 用户计划下周去北京出差
-        
+        AI: 如果你喜欢看电影，可以和我讨论。
+        用户: 好的
+        ❌ 用户喜欢看电影（AI 的假设，用户没确认）
+        ✅ 无
+
+        ━━━ 输出格式 ━━━
+        - [临时] 当下心情、短期计划（24h失效）
+        - [长期] 身份、习惯、喜好、关系等永久事实
+        - [!] 用户明确要求记住的信息（永久）
+
+        第三人称，每条≤20字，相关信息合并为一条。无新信息回复"无"。
+
         对话内容：
         \(conversationText)
         """
         
-        // 优先使用辅助模型 (v1.7.2)
+        // 优先使用辅助模型
         let targetModelID = helperGlobalModelID.isEmpty ? selectedGlobalModelID : helperGlobalModelID
         let components = targetModelID.split(separator: "|")
         guard components.count == 2,
@@ -936,13 +1724,12 @@ class ChatViewModel: ObservableObject {
               !provider.apiKey.isEmpty else { return }
         let modelID = String(components[1])
         
-        // 使用非流式请求提取（收集全部结果）
         let extractionMsg = ChatMessage(role: .user, text: extractionPrompt)
         let stream = service.streamChat(
             messages: [extractionMsg],
             modelId: modelID,
             config: provider,
-            temperature: 0.1  // 极低温度确保精确提取
+            temperature: 0.05  // 极低温度
         )
         
         var result = ""
@@ -955,22 +1742,34 @@ class ChatViewModel: ObservableObject {
             return
         }
         
-        // 解析结果
         let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "无", !trimmed.hasPrefix("无") else { return }
         
-        // 获取 Embedding 提供商配置
         let embProvider = getEmbeddingProvider()
         
-        // 逐行解析 "- xxx" 格式
+        // v1.8: 解析双轨前缀
         let lines = trimmed.components(separatedBy: "\n")
         for line in lines {
             var cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            // 解析 "[!] xxx" 或 "- xxx" 格式
+            var memType: MemoryType = .longTerm
+            var memExpiration: Date? = nil
             var isHighPriority = false
-            if cleaned.hasPrefix("[!] ") {
-                cleaned = String(cleaned.dropFirst(4))
+            
+            // 解析前缀
+            if cleaned.hasPrefix("[!] ") || cleaned.hasPrefix("- [!] ") {
+                cleaned = cleaned.replacingOccurrences(of: "[!] ", with: "")
+                cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
                 isHighPriority = true
+                memType = .longTerm
+            } else if cleaned.hasPrefix("[临时]") || cleaned.hasPrefix("- [临时]") {
+                cleaned = cleaned.replacingOccurrences(of: "[临时]", with: "")
+                cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
+                memType = .shortTerm
+                memExpiration = Date().addingTimeInterval(24 * 3600) // 24h 过期
+            } else if cleaned.hasPrefix("[长期]") || cleaned.hasPrefix("- [长期]") {
+                cleaned = cleaned.replacingOccurrences(of: "[长期]", with: "")
+                cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
+                memType = .longTerm
             } else if cleaned.hasPrefix("- ") {
                 cleaned = String(cleaned.dropFirst(2))
             } else if cleaned.hasPrefix("* ") {
@@ -979,7 +1778,7 @@ class ChatViewModel: ObservableObject {
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleaned.isEmpty, cleaned.count > 2 else { continue }
             
-            // 生成向量嵌入（如果配置了 Embedding 提供商）
+            // 生成向量嵌入
             var emb: [Float]? = nil
             if let (embConfig, embModel) = embProvider {
                 do {
@@ -990,7 +1789,7 @@ class ChatViewModel: ObservableObject {
             }
             
             await MainActor.run {
-                addMemory(cleaned, embedding: emb, importance: isHighPriority ? 0.8 : 0.5)
+                addMemory(cleaned, embedding: emb, importance: isHighPriority ? 0.9 : 0.5, type: memType, expiration: memExpiration)
             }
         }
         
@@ -998,7 +1797,17 @@ class ChatViewModel: ObservableObject {
     }
     
     /// 获取 Embedding 提供商配置
-    private func getEmbeddingProvider() -> (ProviderConfig, String)? {
+    func getEmbeddingProvider() -> (ProviderConfig, String)? {
+        // v1.8: Workers AI 特殊处理
+        if embeddingProviderID == "workersAI" {
+            let url = workersAIEmbeddingURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !url.isEmpty else { return nil }
+            let virtualConfig = ProviderConfig(
+                name: "Workers AI", baseURL: url, apiKey: "none",
+                isPreset: false, icon: "☁️", apiType: .workersAI
+            )
+            return (virtualConfig, "workers-ai-embedding")
+        }
         guard !embeddingProviderID.isEmpty, !embeddingModelID.isEmpty,
               let providerUUID = UUID(uuidString: embeddingProviderID),
               let provider = providers.first(where: { $0.id == providerUUID }),
@@ -1006,47 +1815,112 @@ class ChatViewModel: ObservableObject {
         return (provider, embeddingModelID)
     }
     
-    /// 余弦相似度
-    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count, !a.isEmpty else { return 0 }
-        var dotProduct: Float = 0
-        var normA: Float = 0
-        var normB: Float = 0
-        for i in 0..<a.count {
-            dotProduct += a[i] * b[i]
-            normA += a[i] * a[i]
-            normB += b[i] * b[i]
+    /// v1.8: 探测 Embedding 模型的输出维度
+    func probeEmbeddingDimension() async {
+        guard let (config, modelId) = getEmbeddingProvider() else { return }
+        do {
+            let testEmb = try await service.fetchEmbedding(text: "test", modelId: modelId, config: config)
+            let dim = testEmb.count
+            await MainActor.run {
+                if dim > 0 {
+                    self.detectedEmbeddingDim = dim
+                    print("✅ 探测到 Embedding 维度: \(dim)")
+                }
+            }
+        } catch {
+            print("⚠️ 维度探测失败: \(error.localizedDescription)")
         }
-        let denominator = sqrt(normA) * sqrt(normB)
-        guard denominator > 0 else { return 0 }
-        return dotProduct / denominator
     }
     
-    /// 检索与查询最相关的 Top-K 记忆
+    /// v1.8: 检查并自动迁移记忆向量（维度不匹配时）
+    func checkAndAutoMigrate() async {
+        guard detectedEmbeddingDim > 0 else { return }
+        guard let (config, modelId) = getEmbeddingProvider() else { return }
+        
+        // 找出维度不匹配或缺失向量的记忆
+        let mismatchedIndices = memories.enumerated().compactMap { (idx, mem) -> Int? in
+            guard let emb = mem.embedding else { return idx } // 缺失向量，需要补全
+            return emb.count != detectedEmbeddingDim ? idx : nil // 维度不匹配，需要重新生成
+        }
+        
+        guard !mismatchedIndices.isEmpty else { return }
+        
+        await MainActor.run {
+            migrationProgress = "迁移中 0/\(mismatchedIndices.count)"
+        }
+        
+        var successCount = 0
+        for (i, memIdx) in mismatchedIndices.enumerated() {
+            do {
+                let newEmb = try await service.fetchEmbedding(
+                    text: memories[memIdx].content,
+                    modelId: modelId,
+                    config: config
+                )
+                await MainActor.run {
+                    if memIdx < memories.count {
+                        memories[memIdx].embedding = newEmb
+                        memories[memIdx].lastUpdated = Date()
+                    }
+                    migrationProgress = "迁移中 \(i + 1)/\(mismatchedIndices.count)"
+                }
+                successCount += 1
+                // 每 10 条保存一次
+                if successCount % 10 == 0 {
+                    await MainActor.run { saveMemories() }
+                }
+            } catch {
+                print("⚠️ 迁移第 \(i+1) 条失败: \(error.localizedDescription)")
+                // 继续处理其他的，不中断
+            }
+        }
+        
+        await MainActor.run {
+            saveMemories()
+            migrationProgress = nil
+            print("✅ 记忆迁移完成，成功 \(successCount)/\(mismatchedIndices.count)")
+        }
+    }
+    
+    /// 余弦相似度 (v1.8: Accelerate 优化)
+    private func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
+        vDSP_dotpr(a, 1, a, 1, &normA, vDSP_Length(a.count))
+        vDSP_dotpr(b, 1, b, 1, &normB, vDSP_Length(b.count))
+        let denom = sqrt(normA) * sqrt(normB)
+        guard denom > 0 else { return 0 }
+        return dot / denom
+    }
+    
+    /// 检索与查询最相关的 Top-K 记忆 (v1.8: 过滤过期记忆)
     func retrieveRelevantMemories(for query: String, topK: Int = 5) async -> [MemoryItem] {
-        // 如果没有配置 Embedding，返回全部记忆
+        // v1.8: 先过滤过期的临时记忆
+        let activeMemories = memories.filter { !$0.isExpired }
+        guard !activeMemories.isEmpty else { return [] }
+        
+        // 如果没有配置 Embedding，返回全部活跃记忆
         guard let (embConfig, embModel) = getEmbeddingProvider() else {
-            return Array(memories.prefix(topK))
+            return Array(activeMemories.prefix(topK))
         }
         
-        // 检查是否有记忆带有 embedding
-        let memoriesWithEmbedding = memories.filter { $0.embedding != nil }
+        let memoriesWithEmbedding = activeMemories.filter { $0.embedding != nil }
         guard !memoriesWithEmbedding.isEmpty else {
-            return Array(memories.prefix(topK))
+            return Array(activeMemories.prefix(topK))
         }
         
-        // 生成查询向量
         do {
             let queryEmbedding = try await service.fetchEmbedding(text: query, modelId: embModel, config: embConfig)
             
-            // 计算相似度并排序
             var scored: [(memory: MemoryItem, score: Float)] = []
-            for memory in memories {
+            for memory in activeMemories {
                 if let emb = memory.embedding {
                     let score = cosineSimilarity(queryEmbedding, emb)
                     scored.append((memory, score))
                 } else {
-                    // 没有 embedding 的记忆给中等分数
                     scored.append((memory, 0.3))
                 }
             }
@@ -1055,7 +1929,7 @@ class ChatViewModel: ObservableObject {
             return scored.prefix(topK).map { $0.memory }
         } catch {
             print("⚠️ 查询 Embedding 失败: \(error.localizedDescription)，回退全量注入")
-            return Array(memories.prefix(topK))
+            return Array(activeMemories.prefix(topK))
         }
     }
     
@@ -1142,56 +2016,99 @@ class ChatViewModel: ObservableObject {
             var responseText = ""
             var thinkingText = ""
             
-            // v1.6: 200ms 节流（只更新 streamingText）
+            // v1.12: 统一状态机解析器（与 sendMessage 一致）
+            var isThinking = false
+            var pendingBuffer = ""
+            
+            // v1.12: 统一节流间隔 150ms
             var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 0.15  // 150ms 平衡流畅度和性能
+            let uiUpdateInterval: TimeInterval = 0.15
+            var pendingUpdate = false
             
             do {
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     if Task.isCancelled { break }
                     
-                    var remainingChunk = chunk
-                    while let thinkRange = remainingChunk.range(of: "🧠THINK:") {
-                        let beforeThink = String(remainingChunk[..<thinkRange.lowerBound])
-                        if !beforeThink.isEmpty { responseText += beforeThink }
-                        remainingChunk = String(remainingChunk[thinkRange.upperBound...])
-                        if let nextThinkRange = remainingChunk.range(of: "🧠THINK:") {
-                            thinkingText += String(remainingChunk[..<nextThinkRange.lowerBound])
-                            remainingChunk = String(remainingChunk[nextThinkRange.lowerBound...])
+                    // 1. 处理内部标记 (保留兼容性)
+                    var processedChunk = chunk
+                    if processedChunk.contains("🧠THINK:") {
+                         processedChunk = processedChunk.replacingOccurrences(of: "🧠THINK:", with: "")
+                    }
+                    
+                    // 2. 追加到缓冲
+                    pendingBuffer += processedChunk
+                    
+                    // 3. 状态机解析循环
+                    while true {
+                        let tag = isThinking ? "</think>" : "<think>"
+                        if let range = pendingBuffer.range(of: tag, options: .caseInsensitive) {
+                            let contentBefore = String(pendingBuffer[..<range.lowerBound])
+                            if isThinking {
+                                thinkingText += contentBefore
+                                isThinking = false
+                            } else {
+                                responseText += contentBefore
+                                isThinking = true
+                            }
+                            pendingBuffer = String(pendingBuffer[range.upperBound...])
                         } else {
-                            thinkingText += remainingChunk
-                            remainingChunk = ""
+                            let keepLength = tag.count - 1
+                            if pendingBuffer.count > keepLength {
+                                let safeIndex = pendingBuffer.index(pendingBuffer.endIndex, offsetBy: -keepLength)
+                                let safeContent = String(pendingBuffer[..<safeIndex])
+                                if isThinking { thinkingText += safeContent }
+                                else { responseText += safeContent }
+                                pendingBuffer = String(pendingBuffer[safeIndex...])
+                            }
+                            break
                         }
                     }
-                    if !remainingChunk.isEmpty { responseText += remainingChunk }
                     
-                    let (parsedThinking, parsedContent) = parseThinkTags(responseText)
-                    let finalThinking = thinkingText + (parsedThinking ?? "")
-                    responseText = parsedContent // 更新解析后的内容
-                    thinkingText = finalThinking
-                    
-                    // v1.6: 节流更新 streamingText
+                    // 4. 节流更新 streamingText
                     let now = Date()
                     if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
-                        streamingText = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !thinkingText.isEmpty {
+                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        streamingText = finalContent
+                        if thinkingMode != .disabled {
                             streamingThinkingText = thinkingText
                         }
                         lastUIUpdateTime = now
+                        pendingUpdate = false
+                    } else {
+                        pendingUpdate = true
                     }
+                }
+                
+                // 循环结束，处理剩余 Buffer
+                if !pendingBuffer.isEmpty {
+                    if isThinking { thinkingText += pendingBuffer }
+                    else { responseText += pendingBuffer }
                 }
                 
                 // 流式完成 — 一次性写入 sessions
                 let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let finalThinking = thinkingText
                 if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     currentMsgs[botIndex].text = finalContent
-                    currentMsgs[botIndex].thinkingContent = thinkingText.isEmpty ? nil : thinkingText
+                    if thinkingMode == .disabled {
+                        currentMsgs[botIndex].thinkingContent = nil
+                    } else {
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                    }
                     streamingText = ""
                     streamingThinkingText = ""
                     updateCurrentSessionMessagesInMemory(currentMsgs)
                 }
                 saveSessions()
+                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) } // v1.12: 成功震动
+                
+                // v1.8: 重新生成后也提取记忆
+                if self.memoryEnabled {
+                    Task { [weak self] in
+                        await self?.extractMemories()
+                    }
+                }
                 
             } catch {
                 streamingText = ""
@@ -1201,17 +2118,23 @@ class ChatViewModel: ObservableObject {
                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                         let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
                         currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
-                        if !thinkingText.isEmpty { currentMsgs[botIndex].thinkingContent = thinkingText }
+                        if thinkingMode != .disabled && !thinkingText.isEmpty {
+                            currentMsgs[botIndex].thinkingContent = thinkingText
+                        }
                         updateCurrentSessionMessagesInMemory(currentMsgs)
                     }
                     saveSessions()
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
                     if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
                     else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
-                    if !thinkingText.isEmpty { currentMsgs[botIndex].thinkingContent = thinkingText }
+                    if thinkingMode != .disabled && !thinkingText.isEmpty {
+                        currentMsgs[botIndex].thinkingContent = thinkingText
+                    }
                     updateCurrentSessionMessagesInMemory(currentMsgs)
                     saveSessions()
+                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
                 }
             }
             isLoading = false
@@ -1277,10 +2200,9 @@ class ChatViewModel: ObservableObject {
             return .supported
         }
         
-        // 已知不支持列表
-        if lower.contains("gpt-3") || 
-           lower.contains("gpt-4") || 
-           lower.contains("claude-3") || 
+        // v1.12: 精确匹配不支持思考的模型（避免误判 o1/o3/claude-3.5-sonnet 等）
+        if lower.contains("gpt-3") ||
+           (lower.contains("gpt-4") && !lower.contains("4o")) || // gpt-4-turbo 不支持，gpt-4o 交给 ModelRegistry
            lower.contains("gemini") ||
            lower.contains("deepseek-chat") || // V3 非 R1
            lower.contains("deepseek-v3") {
@@ -1416,9 +2338,9 @@ class ChatViewModel: ObservableObject {
             var isThinking = false
             var pendingBuffer = ""
             
-            // v1.8.3: 终极性能权衡 - 3秒更新 + 实时Markdown
+            // v1.12: 统一节流间隔 150ms（与 sendMessage 一致）
             var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 3.0
+            let uiUpdateInterval: TimeInterval = 0.15
             var pendingUpdate = false
             
             do {
@@ -1500,27 +2422,31 @@ class ChatViewModel: ObservableObject {
                     else { responseText += pendingBuffer }
                 }
                 
-                // v1.8: 完成记录
-                if true {
-                    let finalThinking = thinkingText
-                    var finalContent = responseText
-                    finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
-                    
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        currentMsgs[botIndex].text = finalContent
-                        if thinkingMode == .disabled {
-                            currentMsgs[botIndex].thinkingContent = nil
-                        } else {
-                            currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                        }
-                        currentMsgs[botIndex].completeTime = Date()
-                        if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
-                        updateCurrentSessionMessagesInMemory(currentMsgs)
+                // v1.12: 完成记录
+                let finalThinking = thinkingText
+                let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                    currentMsgs[botIndex].text = finalContent
+                    if thinkingMode == .disabled {
+                        currentMsgs[botIndex].thinkingContent = nil
+                    } else {
+                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
                     }
+                    currentMsgs[botIndex].completeTime = Date()
+                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                    updateCurrentSessionMessagesInMemory(currentMsgs)
                 }
                 
                 saveSessions() // 最终保存
                 if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
+                
+                // v1.8: 编辑重发后也提取记忆
+                if self.memoryEnabled {
+                    Task { [weak self] in
+                        await self?.extractMemories()
+                    }
+                }
                 
             } catch {
                 if Task.isCancelled {

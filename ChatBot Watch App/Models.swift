@@ -8,6 +8,7 @@ enum APIType: String, Codable, Sendable, CaseIterable, Identifiable {
     case gemini = "Google Gemini"
     case openAIResponses = "OpenAI Responses"
     case anthropic = "Anthropic"
+    case workersAI = "Workers AI"
     var id: String { rawValue }
 }
 
@@ -195,7 +196,15 @@ struct ExportableConfig: Codable {
     var modelSettings: [String: ModelSettings] = [:] // v1.7: 模型级设置
     var memories: [MemoryItem]? = nil // v1.7: 记忆数据（可选）
     var sessions: [ChatSession]? = nil // v1.7: 聊天记录（可选）
-    var helperGlobalModelID: String? = nil // v1.7: 辅助模型 ID（可选，用于标题生成等）
+    var helperGlobalModelID: String? = nil // v1.7: 辅助模型 ID
+    var embeddingDimension: Int? = nil // v1.8: 记忆向量维度
+    // v1.12: 补齐的配置字段
+    var embeddingProviderID: String? = nil    // 向量供应商 ID
+    var embeddingModelID: String? = nil       // 向量模型 ID
+    var workersAIEmbeddingURL: String? = nil  // Workers AI 端点
+    var cloudBackupURL: String? = nil         // 云备份地址
+    var cloudBackupAuthKey: String? = nil     // 云备份认证密钥
+    var memoryEnabled: Bool? = nil            // 记忆功能开关
 }
 
 // MARK: - 模型能力配置 (v1.7)
@@ -221,7 +230,14 @@ enum ThinkingMode: String, Codable, Sendable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-// MARK: - 记忆系统 (v1.7)
+// MARK: - 记忆系统 (v1.7 -> v1.8 双轨升级)
+
+enum MemoryType: String, Codable, Sendable, CaseIterable, Identifiable {
+    case shortTerm = "临时"
+    case longTerm = "长期"
+    var id: String { rawValue }
+}
+
 struct MemoryItem: Identifiable, Codable, Hashable, Sendable {
     var id = UUID()
     var content: String          // 记忆内容（如"用户有两只猫"）
@@ -229,4 +245,14 @@ struct MemoryItem: Identifiable, Codable, Hashable, Sendable {
     var source: String? = nil    // 来源会话标题（可选）
     var embedding: [Float]? = nil // v1.7: 向量嵌入
     var importance: Float = 0.5  // v1.7: 重要性评分 (0.0-1.0)
+    // v1.8: 双轨记忆新字段
+    var type: MemoryType = .longTerm       // 默认长期（兼容旧数据）
+    var expiration: Date? = nil            // 临时记忆过期时间（长期为 nil）
+    var lastUpdated: Date? = nil           // 最后更新时间（用于 LRU 淘汰）
+    
+    /// 是否已过期
+    var isExpired: Bool {
+        guard let exp = expiration else { return false }
+        return Date() > exp
+    }
 }

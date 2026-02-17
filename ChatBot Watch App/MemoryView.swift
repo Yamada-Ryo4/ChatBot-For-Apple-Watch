@@ -20,7 +20,9 @@ struct MemoryView: View {
                     Text("共 \(viewModel.memories.count) 条记忆")
                         .font(.caption)
                     Spacer()
-                    Text("\(viewModel.memories.count)/50")
+                    let longCount = viewModel.memories.filter { $0.type == .longTerm }.count
+                    let shortCount = viewModel.memories.filter { $0.type == .shortTerm }.count
+                    Text("长\(longCount)/200 临\(shortCount)")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }

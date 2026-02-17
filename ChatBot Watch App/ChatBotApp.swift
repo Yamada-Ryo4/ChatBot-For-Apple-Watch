@@ -6,6 +6,8 @@ struct ChatBotApp: App {
     // 注入 ViewModel 以便处理外部链接
     @StateObject private var viewModel = ChatViewModel()
     
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
             ChatView()
@@ -21,11 +23,18 @@ struct ChatBotApp: App {
                         }
                     }
                 }
+                .onChange(of: scenePhase) { newPhase in
+                    if newPhase == .active {
+                        // App 启动或从后台进入前台时尝试自动备份
+                        viewModel.performAutoBackupIfNeeded()
+                    }
+                }
         }
     }
 }
 
 // MARK: - Complication Controller
+// TODO: [v2.0] ClockKit 已在 watchOS 9+ 弃用，后续考虑迁移至 WidgetKit
 public class ComplicationController: NSObject, CLKComplicationDataSource {
     
     // MARK: - Timeline Configuration

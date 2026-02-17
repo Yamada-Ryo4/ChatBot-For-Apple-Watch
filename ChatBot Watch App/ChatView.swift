@@ -161,7 +161,7 @@ struct ChatView: View {
                         if viewModel.isLoading,
                            viewModel.streamingText.isEmpty,
                            let lastMsg = viewModel.currentMessages.last,
-                           lastMsg.role == .user || lastMsg.text.isEmpty {
+                           lastMsg.role == .assistant && lastMsg.text.isEmpty {
                             TypingIndicatorView(theme: viewModel.currentTheme)
                                 .transition(.scale(scale: 0.5).combined(with: .opacity))
                                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.isLoading)
@@ -252,7 +252,7 @@ struct ChatView: View {
         .sheet(isPresented: $showHistory) {
             HistoryListView(viewModel: viewModel, isPresented: $showHistory)
         }
-        .onChange(of: scenePhase) { newPhase in
+        .onChange(of: scenePhase) { _, newPhase in  // v1.12: 新版 API
             if newPhase == .inactive || newPhase == .background {
                 viewModel.stopGeneration()
             }
@@ -875,7 +875,10 @@ struct MathText: View {
     }
     
     func isNumber(_ str: String) -> Bool { Double(str) != nil }
-    func isSymbol(_ str: String) -> Bool { !str.first!.isLetter && !str.first!.isNumber }
+    func isSymbol(_ str: String) -> Bool {
+        guard let first = str.first else { return false }
+        return !first.isLetter && !first.isNumber
+    }
 }
 
 // MARK: - 消息内容视图 (根据设置选择渲染方式)

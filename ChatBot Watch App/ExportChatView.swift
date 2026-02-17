@@ -43,6 +43,10 @@ struct ExportChatView: View {
             md += "### \(roleName)\n\n"
             md += "\(msg.text)\n\n"
             
+            // v1.12: 导出思考内容（如果有）
+            if let thinking = msg.thinkingContent, !thinking.isEmpty {
+                md += "<details>\n<summary>💭 思考过程</summary>\n\n\(thinking)\n\n</details>\n\n"
+            }
             
             // 添加时间统计 (如果有)
             if let genTime = msg.generationTimeMs {

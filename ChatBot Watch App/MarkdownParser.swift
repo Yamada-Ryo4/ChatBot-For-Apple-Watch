@@ -44,11 +44,9 @@ struct MarkdownParser {
         // 表格处理
         if r.contains("|") {
             var lines = r.components(separatedBy: "\n")
-            var inTable = false
             for i in 0..<lines.count {
                 let line = lines[i].trimmingCharacters(in: .whitespaces)
                 if line.hasPrefix("|") || (line.contains("|") && line.contains("-")) {
-                    inTable = true
                     
                     // 分割线处理：短分割线，防折行
                     if line.contains("---") {
@@ -61,8 +59,6 @@ struct MarkdownParser {
                         if formatted.hasSuffix(" │ ") { formatted.removeLast(3) }
                         lines[i] = " " + formatted.trimmingCharacters(in: .whitespaces)
                     }
-                } else {
-                    inTable = false
                 }
             }
             r = lines.joined(separator: "\n")
@@ -86,7 +82,6 @@ struct MarkdownParser {
         r = r.replacingOccurrences(of: "\n- [ ] ", with: "\n☐ ")
         r = r.replacingOccurrences(of: "\n- [x] ", with: "\n☑ ")
         r = r.replacingOccurrences(of: "\n- [X] ", with: "\n☑ ")
-        r = r.replacingOccurrences(of: "\n- ", with: "\n- ")
         r = r.replacingOccurrences(of: "\n* ", with: "\n- ")
         // 引用块优化：使用竖线符号 + 斜体模拟引用样式
         // r = r.replacingOccurrences(of: "\n> ", with: "\n| ") // 旧逻辑
